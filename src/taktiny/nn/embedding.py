@@ -13,33 +13,32 @@
 # limitations under the License.
 """Embedding modules"""
 from __future__ import annotations
-
 from typing import Any
-
-
 import jax
 import math
 import jax.numpy as jnp
 import qwix
-from jax.nn.initializers import normal
+from jax.nn import initializers
 
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
 from taktiny.utils.typing import DType
 
+
+default_embedding_initializer = initializers.normal(0.02)
+# Deprecated: Embedding seed
 class Embedding(Module):
     def __init__(
         self, num_embeddings: int,
         embedding_dim: int, *,
         rngs: Rngs | None = None,
         seed: Rngs | None = None,
-        dtype: DType | str = jnp.float32,
-        initializer: Any = normal(0.02),
-        quant: Any=None,
+        dtype: DType = jnp.float32,
+        initializer: Any = default_embedding_initializer,
+        quant: Any = None,
     ) -> None:
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-
         if rngs is None and seed is None:
             raise ValueError("A rngs must be provided to initialize Embedding layer")
 

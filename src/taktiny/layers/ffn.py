@@ -12,17 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Feed Forward Network modules"""
-
 from __future__ import annotations
 from typing import Any
-
-
 import jax, jax.numpy as jnp
 from typing import Callable
-
 from taktiny.utils.typing import ShardMode
 from taktiny.nn.module import Module
 from taktiny import nn
+from taktiny.utils.typing import DType
+
 
 class GateMLP(Module):
     def __init__(
@@ -31,14 +29,14 @@ class GateMLP(Module):
         intermediate_size: int,
         activation: Callable | str = jax.nn.silu,
         bias: bool = False,
-        dtype: str | None = None,
+        dtype: DType | None = None,
         rngs: nn.Rngs | None = None,
         gate_axis_names: tuple[str | None, ...] | None = None,
         up_axis_names: tuple[str | None, ...] | None = None,
         down_axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any=None,
-        dot_general: Any=None,
+        quant: Any = None,
+        dot_general: Any = None,
     ) -> None:
         self.activation = activation if isinstance(activation, Callable) else getattr(jax.nn, activation)
 

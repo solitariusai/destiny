@@ -13,10 +13,8 @@
 # limitations under the License.
 """Base modules for implementing a deep neural network model"""
 
-
 from .module import *
 from .rng import *
-
 from .block import *
 from .conv import *
 from .embedding import *

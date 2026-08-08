@@ -12,53 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Base module class"""
-
 from __future__ import annotations
-
 import jax
 import operator
 import qwix
 from collections.abc import Iterator, Mapping, Sequence
 from jax.tree_util import register_pytree_node_class
-from typing import Any, Self
+import typing as tp
 
 from taktiny.utils.typing import ParameterDict, PyTree, StateDict
+from taktiny.utils.format import format_params, format_bytes, format_dtype
 
-def _format_scaled(value: int | float, scale: int, suffix: str) -> str:
-    number = f"{value / scale:.2f}".rstrip('0').rstrip('.')
-    return f"{number}{suffix}"
-
-def format_params(size: int) -> str:
-    for scale, suffix in (
-        (1_000_000_000_000, 'T'),
-        (1_000_000_000, 'B'),
-        (1_000_000, 'M'),
-        (1_000, 'K'),
-    ):
-        if size >= scale:
-            return _format_scaled(size, scale, suffix)
-    return f"{size:,}"
-
-def format_bytes(size: int) -> str:
-    for scale, suffix in (
-        (1024**4, 'TB'),
-        (1024**3, 'GB'),
-        (1024**2, 'MB'),
-        (1024, 'KB'),
-    ):
-        if size >= scale:
-            number = f"{size / scale:.2f}".rstrip('0').rstrip('.')
-            return f"{number} {suffix}"
-    return f"{int(size)} B"
-
-def format_dtype(dtype: Any) -> str:
-    name = dtype.name
-    if name == 'float32': return 'f32'
-    if name == 'float16': return 'f16'
-    if name == 'bfloat16': return 'bf16'
-    if name == 'int32': return 'i32'
-    if name == 'int64': return 'i64'
-    return name
 
 def iter_children(obj: object) -> Iterator[tuple[str, Module | Parameter]]:
     if not hasattr(obj, '__dict__'): return
@@ -141,7 +105,7 @@ def _is_dynamic(v: object) -> bool:
     return False
 
 class Module:
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, **kwargs: tp.Any) -> None:
         super().__init_subclass__(**kwargs)
         register_pytree_node_class(cls)
 
@@ -152,7 +116,7 @@ class Module:
 
     def tree_flatten(
         self,
-    ) -> tuple[tuple[PyTree, ...], tuple[tuple[str, ...], dict[str, Any]]]:
+    ) -> tuple[tuple[PyTree, ...], tuple[tuple[str, ...], dict[str, tp.Any]]]:
         dynamic_names = []
         dynamic_vals = []
         static_data = {}
@@ -169,9 +133,9 @@ class Module:
     @classmethod
     def tree_unflatten(
         cls,
-        aux_data: tuple[Sequence[str], Mapping[str, Any]],
+        aux_data: tuple[Sequence[str], Mapping[str, tp.Any]],
         children: Sequence[PyTree],
-    ) -> Self:
+    ) -> tp.Self:
         obj = object.__new__(cls)
         dynamic_names, static_data = aux_data
 
@@ -249,19 +213,19 @@ class Parameter(Module):
             return qwix.dequantize(self.value)
         return self.value
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> tp.Any:
         return getattr(self.value, name)
 
-    def tree_flatten(self) -> tuple[tuple[PyTree], dict[str, Any]]:
+    def tree_flatten(self) -> tuple[tuple[PyTree], dict[str, tp.Any]]:
         aux = {k: v for k, v in self.__dict__.items() if k != 'value'}
         return (self.value,), aux
 
     @classmethod
     def tree_unflatten(
         cls,
-        aux_data: Mapping[str, Any],
+        aux_data: Mapping[str, tp.Any],
         children: Sequence[PyTree],
-    ) -> Self:
+    ) -> tp.Self:
         obj = object.__new__(cls)
         obj.value = children[0]
         if aux_data:

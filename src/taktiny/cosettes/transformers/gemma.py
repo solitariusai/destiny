@@ -22,8 +22,8 @@ import jax, jax.numpy as jnp
 from jax.nn.initializers import normal
 
 from taktiny import nn
-from taktiny.cosettes._common import TransformerDecoderLayer
-from taktiny.maestro._config import ModelConfig
+from taktiny.cosettes.common import TransformerDecoderLayer
+from taktiny.maestro.config import ModelConfig
 from taktiny.layers import Attention, GateMLP, RotaryEmbedding
 from taktiny.utils.typing import ShardMode
 

@@ -13,13 +13,10 @@
 # limitations under the License.
 """Utilities modules for stack/group other modules"""
 from __future__ import annotations
-
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
-
 import jax
 import jax.numpy as jnp
-
 from taktiny import transforms as tt
 from taktiny.nn.module import Module
 from taktiny.utils.typing import PyTree
@@ -75,10 +72,10 @@ class List(Module):
     def extra_repr(self) -> str:
         return f"{len(self.layers)}"
 
-
+# TODO: Dict module
 class Dict(Module): ...
 
-
+# TODO: Sequential fix receive Sequence
 class Sequential(Module):
     def __init__(self, *modules: Module) -> None:
         self.layers = tuple(modules)
@@ -111,7 +108,6 @@ class SeqStack(Module):
     def extra_repr(self) -> str:
         return f"{self.num_stack}"
 
-
 class Stack(Module):
     def __init__(self, modules: Iterable[Module]) -> None:
         self.stacked, self.num_stack = _stack_modules(modules)
@@ -140,6 +136,5 @@ class Stack(Module):
 
     def extra_repr(self) -> str:
         return f"{self.num_stack}"
-
 
 __all__ = ['List', 'Sequential', 'SeqStack', 'Stack']

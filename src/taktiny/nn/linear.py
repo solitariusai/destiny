@@ -12,15 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Linear modules."""
-
 from __future__ import annotations
-from typing import Any
-
-
+import typing as tp
 import jax
 import jax.numpy as jnp
 import qwix
 from jax.nn.initializers import lecun_uniform
+import warnings
 
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
@@ -28,23 +26,21 @@ from taktiny.utils.typing import DType, ShardMode
 
 
 default_linear_initializer = lecun_uniform()
-
-
+# Deprecated: Linear seed
 class Linear(Module):
     """General linear projection with optional Qwix-quantized weights."""
-
     def __init__(
         self,
         in_features: int | tuple[int, ...],
         out_features: int | tuple[int, ...],
         *,
         bias: bool = True,
-        dtype: DType | str = jnp.float32,
+        dtype: tp.Optional[DType] = jnp.float32,
         rngs: Rngs | None = None,
         seed: Rngs | None = None,
-        initializer: Any=default_linear_initializer,
-        quant: Any=None,
-        dot_general: Any=None,
+        initializer: tp.Any = default_linear_initializer,
+        quant: tp.Any = None,
+        dot_general: tp.Any = None,
         axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
@@ -67,8 +63,6 @@ class Linear(Module):
         if rngs is None and seed is None:
             raise ValueError('A rngs must be provided to initialize Linear layer')
         if rngs is None:
-            import warnings
-
             warnings.warn('seed is deprecated. use `rngs` instead')
             rngs = seed
 

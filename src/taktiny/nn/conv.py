@@ -13,13 +13,12 @@
 # limitations under the License.
 """Convolution modules"""
 from __future__ import annotations
-
-
 import jax
 import jax.numpy as jnp
 import math
 
 from taktiny import nn
+
 
 class Conv2d(nn.Module):
     def __init__(
