@@ -22,5 +22,6 @@ from .flatten import *
 from .linear import *
 from .lora import *
 from .normalization import *
+from .regularization import *
 from .activation import *
 from .resampling import *
