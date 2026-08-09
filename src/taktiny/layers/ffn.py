@@ -11,18 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Feed Forward Network modules"""
+"""
+Feed Forward Network modules
+TODO: rewrite this file
+"""
 from __future__ import annotations
 from typing import Any
 import jax, jax.numpy as jnp
 from typing import Callable
-from taktiny.utils.typing import ShardMode
-from taktiny.nn.module import Module
+
+from taktiny.utils.typing import AxisNames, ShardMode
 from taktiny import nn
 from taktiny.utils.typing import DType
 
-
-class GateMLP(Module):
+class GateMLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -31,9 +33,9 @@ class GateMLP(Module):
         bias: bool = False,
         dtype: DType | None = None,
         rngs: nn.Rngs | None = None,
-        gate_axis_names: tuple[str | None, ...] | None = None,
-        up_axis_names: tuple[str | None, ...] | None = None,
-        down_axis_names: tuple[str | None, ...] | None = None,
+        gate_axis_names: AxisNames | None = None,
+        up_axis_names: AxisNames | None = None,
+        down_axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -67,7 +69,7 @@ class GateMLP(Module):
         up = self.up_proj(x)
         return self.down_proj(gate * up, out_sharding=out_sharding)
 
-class FusedGateMLP(Module):
+class FusedGateMLP(nn.Module):
     """
     GateMLP where the gate and up projections are fused into a single linear layer.
     """
@@ -79,8 +81,8 @@ class FusedGateMLP(Module):
         bias: bool = False,
         dtype: str | None = None,
         seed: nn.Rngs | None = None,
-        linear_in_axis_names: tuple[str | None, ...] | None = None,
-        linear_out_axis_names: tuple[str | None, ...] | None = None,
+        linear_in_axis_names: AxisNames | None = None,
+        linear_out_axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any=None,
         dot_general: Any=None,
@@ -159,8 +161,7 @@ class FusedGateMLP(Module):
         else:
             raise ValueError(f"Unknown MoE kernel method: '{kernel}'")
 
-
-class MoeFFN(Module):
+class MoeFFN(nn.Module):
     """
     Mixture-of-Experts (MoE) FFN module utilizing Megablox Grouped Matrix Multiply (GMM)
     and activation sorting kernels.
@@ -244,8 +245,7 @@ class MoeFFN(Module):
         else:
             raise ValueError(f"Unknown MoE kernel method: '{kernel}'")
 
-
-class MLP(Module):
+class MLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,

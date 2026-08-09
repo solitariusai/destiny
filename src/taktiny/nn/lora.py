@@ -16,10 +16,8 @@ from __future__ import annotations
 from typing import Any
 import jax
 import jax.numpy as jnp
-
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
-
 
 class LoRALinear(Module):
     def __init__(

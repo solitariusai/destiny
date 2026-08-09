@@ -14,9 +14,8 @@
 """Module components for constructing a model"""
 
 from .attention import *
-from .conv import *
 from .ffn import *
-from .norm import *
-from .posemb import *
+from .normalization import *
+from .positional_embedding import *
 from .recurrent import *
 from .resnet import *

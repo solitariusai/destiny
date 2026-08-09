@@ -22,8 +22,7 @@ import warnings
 
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
-from taktiny.utils.typing import DType, ShardMode
-
+from taktiny.utils.typing import AxisNames, DType, Initializer, ShardMode
 
 default_linear_initializer = lecun_uniform()
 # Deprecated: Linear seed
@@ -38,10 +37,10 @@ class Linear(Module):
         dtype: tp.Optional[DType] = jnp.float32,
         rngs: Rngs | None = None,
         seed: Rngs | None = None,
-        initializer: tp.Any = default_linear_initializer,
+        initializer: Initializer = default_linear_initializer,
         quant: tp.Any = None,
         dot_general: tp.Any = None,
-        axis_names: tuple[str | None, ...] | None = None,
+        axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if isinstance(in_features, int):
@@ -56,7 +55,7 @@ class Linear(Module):
 
         self.in_features = in_features
         self.out_features = out_features
-        self.use_bias = bias
+        self.has_bias = bias
         self.dot_general = dot_general
         self.shard_mode = shard_mode
 
@@ -101,18 +100,32 @@ class Linear(Module):
         )
         weight = self.weight.value
 
+        explicit_out_sharding = (
+            out_sharding
+            if self.shard_mode == ShardMode.EXPLICIT
+            else None
+        )
+
         if isinstance(weight, qwix.QArray):
             out = qwix.dot_general(x, weight, dimension_numbers)
         elif self.dot_general is not None:
             out = self.dot_general(x, weight, dimension_numbers)
         else:
-            out = jax.lax.dot_general(x, weight, dimension_numbers)
+            out = jax.lax.dot_general(
+                x,
+                weight,
+                dimension_numbers,
+                out_sharding=explicit_out_sharding,
+            )
 
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            out = jax.lax.with_sharding_constraint(out, out_sharding)
-
-        if self.use_bias:
+        if self.has_bias:
             out += self.bias.value
+
+        if explicit_out_sharding is not None:
+            out = jax.lax.with_sharding_constraint(
+                out,
+                explicit_out_sharding,
+            )
 
         return out
 

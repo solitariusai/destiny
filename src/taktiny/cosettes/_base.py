@@ -32,6 +32,7 @@ from safetensors.flax import save_file
 
 from taktiny.nn import Module, Rngs
 from taktiny.nn.module import iter_children
+from taktiny.utils.typing import AxisNames
 
 
 class PretrainedModel(Module):
@@ -921,7 +922,7 @@ class PretrainedModel(Module):
 
         def parameter_sharding(
             parameter: Any,
-            axis_names: Any=None,
+            axis_names: AxisNames | None=None,
             *,
             use_explicit: bool=True,
         ) -> Any:

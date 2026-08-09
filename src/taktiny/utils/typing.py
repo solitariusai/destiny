@@ -27,13 +27,15 @@ from jax.typing import ArrayLike as JaxArrayLike, DTypeLike
 Array: TypeAlias = jax.Array
 ArrayLike: TypeAlias = JaxArrayLike
 DType: TypeAlias = DTypeLike
+Initializer: TypeAlias = Callable[..., Array]
 PRNGKey: TypeAlias = jax.Array
 PyTree: TypeAlias = Any
 Shape: TypeAlias = Sequence[int]
 Axes: TypeAlias = int | Sequence[int]
-AxisName: TypeAlias = str | tuple[str | None, ...] | None
-AxisNames: TypeAlias = tuple[str | None, ...]
-LogicalRules: TypeAlias = Sequence[tuple[str, AxisName]]
+AxisName: TypeAlias = str | None
+AxisNames: TypeAlias = tuple[AxisName, ...]
+MeshAxisName: TypeAlias = str | tuple[str, ...] | None
+LogicalRules: TypeAlias = Sequence[tuple[str, MeshAxisName]]
 Sharding: TypeAlias = NamedSharding | PartitionSpec | None
 MeshLike: TypeAlias = Mesh | None
 PathLike: TypeAlias = str | OSPathLike[str]
@@ -77,8 +79,10 @@ __all__ = [
     'Batch',
     'DType',
     'EpochAware',
+    'Initializer',
     'LogicalRules',
     'LossFn',
+    'MeshAxisName',
     'MeshLike',
     'ModuleFactory',
     'MutableBatch',

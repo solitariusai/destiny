@@ -17,7 +17,6 @@ from collections.abc import Callable
 import jax
 from taktiny import nn
 
-
 class _ActivationBase(nn.Module):
     def __call__(
         self,

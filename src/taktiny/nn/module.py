@@ -23,7 +23,6 @@ import typing as tp
 from taktiny.utils.typing import ParameterDict, PyTree, StateDict
 from taktiny.utils.format import format_params, format_bytes, format_dtype
 
-
 def iter_children(obj: object) -> Iterator[tuple[str, Module | Parameter]]:
     if not hasattr(obj, '__dict__'): return
     for k, v in obj.__dict__.items():
@@ -32,6 +31,12 @@ def iter_children(obj: object) -> Iterator[tuple[str, Module | Parameter]]:
         elif isinstance(v, (list, tuple)) and all(isinstance(x, (Module, Parameter)) for x in v):
             for i, x in enumerate(v):
                 name = str(i) if k == 'layers' else f"{k}.{i}"
+                yield name, x
+        elif isinstance(v, Mapping) and all(
+            isinstance(x, (Module, Parameter)) for x in v.values()
+        ):
+            for key, x in v.items():
+                name = str(key) if k == 'layers' else f'{k}.{key}'
                 yield name, x
 
 def build_tree_repr(
@@ -105,9 +110,27 @@ def _is_dynamic(v: object) -> bool:
     return False
 
 class Module:
+    training: bool = True
+
     def __init_subclass__(cls, **kwargs: tp.Any) -> None:
         super().__init_subclass__(**kwargs)
         register_pytree_node_class(cls)
+
+    def train(self) -> tp.Self:
+        """Set this module and every child module to training mode."""
+        self.training = True
+        for _, child in iter_children(self):
+            if isinstance(child, Module) and not isinstance(child, Parameter):
+                child.train()
+        return self
+
+    def eval(self) -> tp.Self:
+        """Set this module and every child module to evaluation mode."""
+        self.training = False
+        for _, child in iter_children(self):
+            if isinstance(child, Module) and not isinstance(child, Parameter):
+                child.eval()
+        return self
 
     def extra_repr(self) -> str: return ""
     def __repr__(self) -> str:
@@ -248,4 +271,17 @@ def _make_magic_methods() -> None:
 
 _make_magic_methods()
 
-__all__ = ['Module', 'Parameter']
+def module(cls):
+    if issubclass(cls, Module):
+        return cls
+
+    return type(
+        cls.__name__,
+        (cls, Module),
+        {
+            "__module__": cls.__module__,
+            "__qualname__": cls.__qualname__,
+        },
+    )
+
+__all__ = ['Module', 'Parameter', 'module']

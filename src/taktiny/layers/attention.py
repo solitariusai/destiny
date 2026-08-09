@@ -21,16 +21,13 @@ import jax.numpy as jnp
 import math
 
 from taktiny import nn
-from taktiny.layers.posemb import RotaryEmbedding
-from taktiny.utils.typing import ShardMode, DType
-
+from taktiny.layers.positional_embedding import RotaryEmbedding
+from taktiny.utils.typing import AxisNames, DType, ShardMode
 
 class SegmentIds(NamedTuple):
     """Compact query and key/value segment identifiers."""
-
     q: jax.Array
     kv: jax.Array
-
 
 class Attention(nn.Module):
     def __init__(
@@ -47,10 +44,10 @@ class Attention(nn.Module):
         dtype: DType | str | None = None,
         window_size: int | None = None,
         rngs: nn.Rngs | None = None,
-        q_axis_names: tuple[str | None, ...] | None = None,
-        k_axis_names: tuple[str | None, ...] | None = None,
-        v_axis_names: tuple[str | None, ...] | None = None,
-        o_axis_names: tuple[str | None, ...] | None = None,
+        q_axis_names: AxisNames | None = None,
+        k_axis_names: AxisNames | None = None,
+        v_axis_names: AxisNames | None = None,
+        o_axis_names: AxisNames | None = None,
         q_bias: bool | None = None,
         k_bias: bool | None = None,
         v_bias: bool | None = None,
@@ -912,6 +909,7 @@ class Attention(nn.Module):
 
         return out, None
 
+# TODO: rewrite JointAttention
 class JointAttention(nn.Module):
     """
     Generic Joint/Double-Stream Attention for Multimodal architectures (e.g. MM-DiT).
@@ -1022,3 +1020,5 @@ class JointAttention(nn.Module):
         out2 = self.o_proj_2(out2.reshape(B, L2, -1))
 
         return out1, out2
+
+__all__ = ['Attention']

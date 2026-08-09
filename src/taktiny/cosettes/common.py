@@ -470,15 +470,24 @@ class TransformerModel(nn.Module):
 
         dtype = config.torch_dtype or config.dtype or 'bfloat16'
         quant = config.quant
+        shard_mode = config.shard_mode or ShardMode.AUTO
         if isinstance(embedding, nn.Module):
             embed_tokens = embedding
         elif isinstance(embedding, type) and issubclass(embedding, nn.Module):
+            embedding_kwargs = {
+                'rngs': rngs,
+                'dtype': dtype,
+                'quant': quant,
+            }
+            if issubclass(embedding, nn.Embedding):
+                embedding_kwargs.update(
+                    axis_names=('vocab', 'embed'),
+                    shard_mode=shard_mode,
+                )
             embed_tokens = embedding(
                 vocab_size,
                 hidden_size,
-                rngs=rngs,
-                dtype=dtype,
-                quant=quant,
+                **embedding_kwargs,
             )
         else:
             raise TypeError('embedding should be an nn.Module subclass or instance')
@@ -490,14 +499,16 @@ class TransformerModel(nn.Module):
         self.embed_tokens       = embed_tokens
         if hasattr(self.embed_tokens, 'embedding'):
             self.embed_tokens.embedding.axis_names = ('vocab', 'embed')
+        if isinstance(self.embed_tokens, nn.Embedding):
+            self.embed_tokens.shard_mode = shard_mode
 
         self.use_list = use_list
         if use_list:
             self.layers = nn.List(
-                *(
+                [
                     module(config, rngs=rngs, layer_idx=layer_idx)
                     for layer_idx in range(num_hidden_layers)
-                )
+                ]
             )
         else:
             def stacked_layers() -> Iterator[nn.Module]:
@@ -548,7 +559,10 @@ class TransformerModel(nn.Module):
         out_sharding: jax.sharding.Sharding | None = None,
     ) -> tuple[jax.Array, KVCache | None]:
         if not jnp.issubdtype(x.dtype, jnp.inexact):
-            x = self.embed_tokens(x)
+            if isinstance(self.embed_tokens, nn.Embedding):
+                x = self.embed_tokens(x, out_sharding=out_sharding)
+            else:
+                x = self.embed_tokens(x)
 
         def call_layer(layer: tp.Any, hidden_states: tp.Any, layer_cache: tp.Any) -> tp.Any:
             return layer(
