@@ -12,11 +12,134 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import annotations
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from itertools import product
 import math
+from numbers import Real
 import jax
 import jax.numpy as jnp
+
+from taktiny.utils.typing import Activation, Axes, ShardMode
+
+
+def _validate_integer(
+    value: int,
+    name: str,
+    *,
+    minimum: int = 1,
+) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < minimum
+    ):
+        if minimum == 1:
+            requirement = 'a positive integer'
+        elif minimum == 0:
+            requirement = 'a non-negative integer'
+        else:
+            requirement = f'an integer greater than or equal to {minimum}'
+        raise ValueError(f'{name} must be {requirement}')
+    return value
+
+
+def _normalize_shape(
+    value: int | Sequence[int],
+    name: str,
+) -> tuple[int, ...]:
+    values = (value,) if isinstance(value, int) else tuple(value)
+    if not values:
+        raise ValueError(f'{name} must contain at least one dimension')
+    for index, size in enumerate(values):
+        _validate_integer(size, f'{name}[{index}]')
+    return values
+
+
+def _validate_positive_float(value: float, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f'{name} must be finite and positive')
+    return float(value)
+
+
+def _resolve_training(default: bool, training: bool | None) -> bool:
+    if training is None:
+        return default
+    if not isinstance(training, bool):
+        raise TypeError('training must be a bool or None')
+    return training
+
+
+def _canonical_axis(
+    axis: int,
+    ndim: int,
+    *,
+    name: str = 'axis',
+    allow_scalar: bool = False,
+) -> int:
+    if not isinstance(axis, int) or isinstance(axis, bool):
+        raise TypeError(f'{name} must be an integer')
+    if ndim == 0 and allow_scalar and axis in {-1, 0}:
+        return 0
+    canonical = axis + ndim if axis < 0 else axis
+    if canonical < 0 or canonical >= ndim:
+        raise ValueError(
+            f'{name}={axis} is out of range for an array of rank {ndim}'
+        )
+    return canonical
+
+
+def _canonical_axes(
+    axes: Axes,
+    ndim: int,
+    *,
+    name: str = 'axes',
+    allow_empty: bool = False,
+) -> tuple[int, ...]:
+    values = (axes,) if isinstance(axes, int) else tuple(axes)
+    if not values and not allow_empty:
+        raise ValueError(f'{name} must contain at least one axis')
+    canonical = tuple(
+        _canonical_axis(axis, ndim, name=f'{name} value')
+        for axis in values
+    )
+    if len(set(canonical)) != len(canonical):
+        raise ValueError(f'{name} must not contain duplicates')
+    return canonical
+
+
+def _resolve_activation(
+    activation: Activation | None,
+    *,
+    allow_none: bool = False,
+) -> Callable[[jax.Array], jax.Array]:
+    if activation is None:
+        if allow_none:
+            return lambda value: value
+        raise TypeError('activation must be a string or callable')
+    if callable(activation):
+        return activation
+    if not isinstance(activation, str):
+        expected = 'a string, callable, or None' if allow_none else 'a string or callable'
+        raise TypeError(f'activation must be {expected}')
+    function = getattr(jax.nn, activation.lower(), None)
+    if function is None or not callable(function):
+        raise ValueError(f'unsupported activation: {activation!r}')
+    return function
+
+
+def _constrain(
+    value: jax.Array,
+    sharding: jax.sharding.Sharding | None,
+    shard_mode: ShardMode,
+) -> jax.Array:
+    if shard_mode == ShardMode.EXPLICIT and sharding is not None:
+        return jax.lax.with_sharding_constraint(value, sharding)
+    return value
 
 def _normalize_nonnegative(
     value: int | Sequence[int],
@@ -297,6 +420,14 @@ def _adaptive_pool(
     return output, index_output
 
 __all__ = [
+    '_validate_integer',
+    '_normalize_shape',
+    '_validate_positive_float',
+    '_resolve_training',
+    '_canonical_axis',
+    '_canonical_axes',
+    '_resolve_activation',
+    '_constrain',
     '_normalize_nonnegative',
     '_conv_dimension_numbers',
     '_as_batched',

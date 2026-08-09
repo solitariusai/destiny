@@ -20,6 +20,7 @@ import qwix
 from jax.nn import initializers
 
 from taktiny import nn
+from taktiny.nn.utils import _constrain
 from taktiny.utils.typing import AxisNames, DType, Initializer, ShardMode
 
 default_embedding_initializer = initializers.normal(0.02)
@@ -78,9 +79,7 @@ class Embedding(nn.Module):
         else:
             output = table[indices]
 
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            output = jax.lax.with_sharding_constraint(output, out_sharding)
-        return output
+        return _constrain(output, out_sharding, self.shard_mode)
 
     @classmethod
     def apply_gather_reduce(

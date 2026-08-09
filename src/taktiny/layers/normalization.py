@@ -14,14 +14,28 @@
 """Conditioned normalization layers."""
 from __future__ import annotations
 from collections.abc import Callable, Sequence
-import math
 from typing import Any, Literal, TypeAlias
 import jax
 import jax.numpy as jnp
 
 from taktiny import nn
 from taktiny.nn.linear import default_linear_initializer
-from taktiny.utils.typing import Axes, AxisNames, DType, Initializer, ShardMode
+from taktiny.nn.utils import (
+    _canonical_axes,
+    _constrain,
+    _normalize_shape,
+    _resolve_activation,
+    _validate_integer,
+    _validate_positive_float,
+)
+from taktiny.utils.typing import (
+    Activation,
+    Axes,
+    AxisNames,
+    DType,
+    Initializer,
+    ShardMode,
+)
 
 NormType: TypeAlias = Literal['layernorm', 'rmsnorm']
 NormModule: TypeAlias = (
@@ -30,49 +44,6 @@ NormModule: TypeAlias = (
 Normalizer: TypeAlias = (
     NormType | NormModule | Callable[[jax.Array], jax.Array]
 )
-Activation: TypeAlias = str | Callable[[jax.Array], jax.Array] | None
-
-def _positive_integer(value: int, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f'{name} must be a positive integer')
-    return value
-
-def _canonical_axes(axes: Axes, ndim: int) -> int | tuple[int, ...]:
-    values = (axes,) if isinstance(axes, int) else tuple(axes)
-    if not values:
-        raise ValueError('axes must contain at least one axis')
-    if not all(isinstance(axis, int) for axis in values):
-        raise TypeError('axes must contain only integers')
-
-    canonical = tuple(axis + ndim if axis < 0 else axis for axis in values)
-    if any(axis < 0 or axis >= ndim for axis in canonical):
-        raise ValueError(f'axes {values} are invalid for an array of rank {ndim}')
-    if len(set(canonical)) != len(canonical):
-        raise ValueError('axes must not contain duplicates')
-    return canonical[0] if len(canonical) == 1 else canonical
-
-def _resolve_activation(activation: Activation) -> Callable[[jax.Array], jax.Array]:
-    if activation is None:
-        return lambda value: value
-    if callable(activation):
-        return activation
-    if not isinstance(activation, str):
-        raise TypeError('activation must be a string, callable, or None')
-
-    function = getattr(jax.nn, activation, None)
-    if function is None or not callable(function):
-        raise ValueError(f'unsupported activation: {activation!r}')
-    return function
-
-def _constrain(
-    value: jax.Array,
-    sharding: jax.sharding.Sharding | None,
-    shard_mode: ShardMode,
-) -> jax.Array:
-    if shard_mode == ShardMode.EXPLICIT and sharding is not None:
-        return jax.lax.with_sharding_constraint(value, sharding)
-    return value
-
 class AdaXNorm(nn.Module):
     """
     Normalize activations and project a conditioning tensor.
@@ -92,7 +63,7 @@ class AdaXNorm(nn.Module):
         eps: float = 1e-6,
         *,
         axes: Axes = -1,
-        activation: Activation = 'silu',
+        activation: Activation | None = 'silu',
         bias: bool = True,
         dtype: DType = jnp.float32,
         rngs: nn.Rngs,
@@ -102,19 +73,8 @@ class AdaXNorm(nn.Module):
         axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.embedding_dim = _positive_integer(embedding_dim, 'embedding_dim')
-        if isinstance(out_dim, int):
-            _positive_integer(out_dim, 'out_dim')
-            self.out_dim = (out_dim,)
-        else:
-            self.out_dim = tuple(out_dim)
-            if not self.out_dim:
-                raise ValueError('out_dim must contain at least one dimension')
-            for index, dimension in enumerate(self.out_dim):
-                _positive_integer(dimension, f'out_dim[{index}]')
-
-        if not math.isfinite(eps) or eps <= 0:
-            raise ValueError('eps must be finite and positive')
+        self.embedding_dim = _validate_integer(embedding_dim, 'embedding_dim')
+        self.out_dim = _normalize_shape(out_dim, 'out_dim')
 
         if isinstance(norm, str):
             normalized_name = norm.lower().replace('-', '_')
@@ -135,9 +95,9 @@ class AdaXNorm(nn.Module):
         else:
             raise TypeError('norm must be a supported string, module, or callable')
 
-        self.eps = float(eps)
+        self.eps = _validate_positive_float(eps, 'eps')
         self.axes = axes
-        self.activation = _resolve_activation(activation)
+        self.activation = _resolve_activation(activation, allow_none=True)
         self.shard_mode = shard_mode
         self.linear = nn.Linear(
             self.embedding_dim,
@@ -234,13 +194,11 @@ class SpatialNorm(nn.Module):
         axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.f_channels = _positive_integer(f_channels, 'f_channels')
-        self.zq_channels = _positive_integer(zq_channels, 'zq_channels')
-        self.num_groups = _positive_integer(num_groups, 'num_groups')
+        self.f_channels = _validate_integer(f_channels, 'f_channels')
+        self.zq_channels = _validate_integer(zq_channels, 'zq_channels')
+        self.num_groups = _validate_integer(num_groups, 'num_groups')
         if self.f_channels % self.num_groups != 0:
             raise ValueError('f_channels must be divisible by num_groups')
-        if not math.isfinite(eps) or eps <= 0:
-            raise ValueError('eps must be finite and positive')
         if not isinstance(interpolation, str):
             raise TypeError('interpolation must be a string')
         if axis_names is not None and len(axis_names) != 2:
@@ -248,7 +206,7 @@ class SpatialNorm(nn.Module):
                 'axis_names must contain conditioning and feature axes'
             )
 
-        self.eps = float(eps)
+        self.eps = _validate_positive_float(eps, 'eps')
         self.interpolation = interpolation
         self.shard_mode = shard_mode
         norm_axis_names = (

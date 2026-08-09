@@ -18,24 +18,7 @@ import math
 import jax
 import jax.numpy as jnp
 from taktiny import nn
-
-def _canonical_axis(axis: int, ndim: int, *, name: str) -> int:
-    if not isinstance(axis, int) or isinstance(axis, bool):
-        raise TypeError(f'{name} must be an integer')
-
-    if ndim == 0:
-        if axis in {-1, 0}:
-            return 0
-        raise ValueError(
-            f'{name}={axis} is out of range for a scalar input'
-        )
-
-    canonical = axis + ndim if axis < 0 else axis
-    if canonical < 0 or canonical >= ndim:
-        raise ValueError(
-            f'{name}={axis} is out of range for an input with {ndim} dimensions'
-        )
-    return canonical
+from taktiny.nn.utils import _canonical_axis
 
 
 class Flatten(nn.Module):
@@ -58,11 +41,13 @@ class Flatten(nn.Module):
             self.start_axis,
             x.ndim,
             name='start_axis',
+            allow_scalar=True,
         )
         end_axis = _canonical_axis(
             self.end_axis,
             x.ndim,
             name='end_axis',
+            allow_scalar=True,
         )
         if start_axis > end_axis:
             raise ValueError(

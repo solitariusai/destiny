@@ -26,6 +26,7 @@ from taktiny.nn.utils import (
     _adaptive_pool,
     _as_batched,
     _canonical_padding,
+    _constrain,
     _conv_dimension_numbers,
     _max_identity,
     _normalize_adaptive_size,
@@ -289,9 +290,7 @@ class Conv(nn.Module):
             output = output + self.bias.value
         if unbatched:
             output = output[0]
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            output = jax.lax.with_sharding_constraint(output, out_sharding)
-        return output
+        return _constrain(output, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
         return (
@@ -453,9 +452,7 @@ class ConvTranspose(nn.Module):
         if self.has_bias:
             output = output + self.bias.value
         output = _restore_batch(output, unbatched)
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            output = jax.lax.with_sharding_constraint(output, out_sharding)
-        return output
+        return _constrain(output, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
         return (

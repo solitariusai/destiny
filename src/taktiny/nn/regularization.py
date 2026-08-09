@@ -24,6 +24,12 @@ import jax
 import jax.numpy as jnp
 
 from taktiny.nn.module import Module
+from taktiny.nn.utils import (
+    _canonical_axis,
+    _canonical_axes,
+    _constrain,
+    _resolve_training,
+)
 from taktiny.utils.typing import Axes, PRNGKey, ShardMode
 
 
@@ -41,34 +47,6 @@ def _probability(value: float, *, allow_one: bool = True) -> float:
     return value
 
 
-def _training(module: Module, training: bool | None) -> bool:
-    if training is None:
-        return module.training
-    if not isinstance(training, bool):
-        raise TypeError('training must be a bool or None')
-    return training
-
-
-def _canonical_axis(axis: int, ndim: int, name: str) -> int:
-    if not isinstance(axis, int):
-        raise TypeError(f'{name} must be an integer')
-    canonical = axis + ndim if axis < 0 else axis
-    if canonical < 0 or canonical >= ndim:
-        raise ValueError(f'{name} {axis} is invalid for an array of rank {ndim}')
-    return canonical
-
-
-def _canonical_axes(axes: Axes, ndim: int) -> tuple[int, ...]:
-    values = (axes,) if isinstance(axes, int) else tuple(axes)
-    canonical = tuple(
-        _canonical_axis(axis, ndim, 'broadcast axis')
-        for axis in values
-    )
-    if len(set(canonical)) != len(canonical):
-        raise ValueError('broadcast_axes must not contain duplicates')
-    return canonical
-
-
 def _mask_shape(
     shape: Sequence[int],
     broadcast_axes: tuple[int, ...],
@@ -84,10 +62,14 @@ def _feature_broadcast_axes(
     channel_axis: int,
     batch_axis: int | None,
 ) -> tuple[int, ...]:
-    channel_axis = _canonical_axis(channel_axis, ndim, 'channel_axis')
+    channel_axis = _canonical_axis(channel_axis, ndim, name='channel_axis')
     canonical_batch_axis = None
     if batch_axis is not None:
-        canonical_batch_axis = _canonical_axis(batch_axis, ndim, 'batch_axis')
+        canonical_batch_axis = _canonical_axis(
+            batch_axis,
+            ndim,
+            name='batch_axis',
+        )
         if canonical_batch_axis == channel_axis:
             raise ValueError('batch_axis and channel_axis must be different')
     return tuple(
@@ -101,16 +83,6 @@ def _require_key(key: PRNGKey | None) -> PRNGKey:
     if key is None:
         raise ValueError('a key is required in training mode when p is nonzero')
     return key
-
-
-def _constrain(
-    value: jax.Array,
-    sharding: jax.sharding.Sharding | None,
-    shard_mode: ShardMode,
-) -> jax.Array:
-    if shard_mode == ShardMode.EXPLICIT and sharding is not None:
-        return jax.lax.with_sharding_constraint(value, sharding)
-    return value
 
 
 class Dropout(Module):
@@ -166,11 +138,16 @@ class Dropout(Module):
         out_sharding: jax.sharding.Sharding | None = None,
     ) -> jax.Array:
         x = jnp.asarray(x)
-        axes = _canonical_axes(self.broadcast_axes, x.ndim)
+        axes = _canonical_axes(
+            self.broadcast_axes,
+            x.ndim,
+            name='broadcast_axes',
+            allow_empty=True,
+        )
         output = self._apply(
             x,
             key=key,
-            training=_training(self, training),
+            training=_resolve_training(self.training, training),
             broadcast_axes=axes,
         )
         return _constrain(output, out_sharding, self.shard_mode)
@@ -206,7 +183,7 @@ class FeatureDropout(Dropout):
         output = self._apply(
             x,
             key=key,
-            training=_training(self, training),
+            training=_resolve_training(self.training, training),
             broadcast_axes=_feature_broadcast_axes(
                 x.ndim,
                 self.channel_axis,
@@ -282,11 +259,16 @@ class AlphaDropout(Module):
         out_sharding: jax.sharding.Sharding | None = None,
     ) -> jax.Array:
         x = jnp.asarray(x)
-        axes = _canonical_axes(self.broadcast_axes, x.ndim)
+        axes = _canonical_axes(
+            self.broadcast_axes,
+            x.ndim,
+            name='broadcast_axes',
+            allow_empty=True,
+        )
         output = self._apply(
             x,
             key=key,
-            training=_training(self, training),
+            training=_resolve_training(self.training, training),
             broadcast_axes=axes,
         )
         return _constrain(output, out_sharding, self.shard_mode)
@@ -322,7 +304,7 @@ class FeatureAlphaDropout(AlphaDropout):
         output = self._apply(
             x,
             key=key,
-            training=_training(self, training),
+            training=_resolve_training(self.training, training),
             broadcast_axes=_feature_broadcast_axes(
                 x.ndim,
                 self.channel_axis,
@@ -370,7 +352,7 @@ class StochasticDepth(Dropout):
             batch_axis = _canonical_axis(
                 self.batch_axis,
                 x.ndim,
-                'batch_axis',
+                name='batch_axis',
             )
             broadcast_axes = tuple(
                 axis for axis in range(x.ndim) if axis != batch_axis
@@ -378,7 +360,7 @@ class StochasticDepth(Dropout):
         output = self._apply(
             x,
             key=key,
-            training=_training(self, training),
+            training=_resolve_training(self.training, training),
             broadcast_axes=broadcast_axes,
         )
         return _constrain(output, out_sharding, self.shard_mode)

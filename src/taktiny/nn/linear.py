@@ -22,25 +22,10 @@ import warnings
 
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
+from taktiny.nn.utils import _constrain, _normalize_shape
 from taktiny.utils.typing import AxisNames, DType, Initializer, ShardMode
 
 default_linear_initializer = lecun_uniform()
-
-
-def _feature_shape(
-    features: int | tuple[int, ...],
-    name: str,
-) -> tuple[int, ...]:
-    if isinstance(features, int):
-        features = (features,)
-    else:
-        features = tuple(features)
-    if not features or any(
-        not isinstance(size, int) or isinstance(size, bool) or size <= 0
-        for size in features
-    ):
-        raise ValueError(f'{name} must contain positive integers')
-    return features
 
 
 # Deprecated: Linear seed
@@ -139,13 +124,7 @@ class Linear(Module):
         if self.has_bias:
             out += self.bias.value
 
-        if explicit_out_sharding is not None:
-            out = jax.lax.with_sharding_constraint(
-                out,
-                explicit_out_sharding,
-            )
-
-        return out
+        return _constrain(out, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
         in_str = 'x'.join(map(str, self.in_features))
@@ -182,9 +161,9 @@ class Bilinear(Module):
         axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.in1_features = _feature_shape(in1_features, 'in1_features')
-        self.in2_features = _feature_shape(in2_features, 'in2_features')
-        self.out_features = _feature_shape(out_features, 'out_features')
+        self.in1_features = _normalize_shape(in1_features, 'in1_features')
+        self.in2_features = _normalize_shape(in2_features, 'in2_features')
+        self.out_features = _normalize_shape(out_features, 'out_features')
         self.has_bias = bias
         self.dot_general = dot_general
         self.shard_mode = shard_mode
@@ -301,12 +280,7 @@ class Bilinear(Module):
 
         if self.has_bias:
             output += self.bias.value
-        if explicit_out_sharding is not None:
-            output = jax.lax.with_sharding_constraint(
-                output,
-                explicit_out_sharding,
-            )
-        return output
+        return _constrain(output, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
         in1 = 'x'.join(map(str, self.in1_features))

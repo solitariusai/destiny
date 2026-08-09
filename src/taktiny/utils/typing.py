@@ -26,6 +26,7 @@ from jax.typing import ArrayLike as JaxArrayLike, DTypeLike
 
 Array: TypeAlias = jax.Array
 ArrayLike: TypeAlias = JaxArrayLike
+Activation: TypeAlias = str | Callable[[Array], Array]
 DType: TypeAlias = DTypeLike
 Initializer: TypeAlias = Callable[..., Array]
 PRNGKey: TypeAlias = jax.Array
@@ -73,6 +74,7 @@ class EpochAware(Protocol):
 __all__ = [
     'Array',
     'ArrayLike',
+    'Activation',
     'Axes',
     'AxisName',
     'AxisNames',

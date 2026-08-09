@@ -20,21 +20,11 @@ import jax.numpy as jnp
 from jax.nn.initializers import lecun_uniform
 
 from taktiny import nn
+from taktiny.nn.utils import _constrain, _validate_integer
 from taktiny.utils.typing import AxisName, AxisNames, DType, Initializer, ShardMode
 
 
 default_recurrent_initializer = lecun_uniform()
-def _validate_size(value: int, *, name: str, allow_zero: bool = False) -> int:
-    minimum = 0 if allow_zero else 1
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or value < minimum
-    ):
-        qualifier = 'non-negative' if allow_zero else 'positive'
-        raise ValueError(f'{name} must be a {qualifier} integer')
-    return value
-
 def _projection_axis_names(
     input_axis: AxisName,
     hidden_axis: AxisName,
@@ -283,9 +273,9 @@ class _RecurrentBase(nn.Module):
         state_sizes: tuple[int, ...],
         cell_factory: Callable[[int, AxisName, AxisName], nn.Module],
     ) -> None:
-        _validate_size(input_size, name='input_size')
-        _validate_size(hidden_size, name='hidden_size')
-        _validate_size(num_layers, name='num_layers')
+        _validate_integer(input_size, 'input_size')
+        _validate_integer(hidden_size, 'hidden_size')
+        _validate_integer(num_layers, 'num_layers')
         if not isinstance(dropout, (int, float)) or isinstance(dropout, bool):
             raise TypeError('dropout must be a number')
         if dropout < 0.0 or dropout > 1.0:
@@ -488,9 +478,7 @@ class _RecurrentBase(nn.Module):
         elif self.batch_first:
             output = jnp.swapaxes(output, 0, 1)
 
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            output = jax.lax.with_sharding_constraint(output, out_sharding)
-
+        output = _constrain(output, out_sharding, self.shard_mode)
         return output, hidden[0] if len(hidden) == 1 else hidden
 
     def extra_repr(self) -> str:
@@ -588,7 +576,7 @@ class LSTM(_RecurrentBase):
         dot_general: Any = None,
         unroll: int | bool = 1,
     ) -> None:
-        _validate_size(proj_size, name='proj_size', allow_zero=True)
+        _validate_integer(proj_size, 'proj_size', minimum=0)
         if proj_size >= hidden_size and proj_size != 0:
             raise ValueError('proj_size must be smaller than hidden_size')
         output_size = proj_size or hidden_size

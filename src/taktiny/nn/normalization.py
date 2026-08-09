@@ -19,6 +19,15 @@ import jax
 import jax.numpy as jnp
 
 from taktiny.nn.module import Module, Parameter
+from taktiny.nn.utils import (
+    _canonical_axis,
+    _canonical_axes,
+    _constrain,
+    _normalize_shape,
+    _resolve_training,
+    _validate_integer,
+    _validate_positive_float,
+)
 from taktiny.utils.typing import (
     Axes,
     AxisNames,
@@ -27,48 +36,6 @@ from taktiny.utils.typing import (
     MeshAxisName,
     ShardMode,
 )
-
-def _positive_integer(value: int, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f'{name} must be a positive integer')
-    return value
-
-def _normalized_shape(shape: int | Sequence[int]) -> tuple[int, ...]:
-    values = (shape,) if isinstance(shape, int) else tuple(shape)
-    if not values:
-        raise ValueError('normalized_shape must contain at least one dimension')
-    for index, value in enumerate(values):
-        _positive_integer(value, f'normalized_shape[{index}]')
-    return values
-
-
-def _validate_eps(eps: float) -> float:
-    if not math.isfinite(eps) or eps <= 0:
-        raise ValueError('eps must be finite and positive')
-    return float(eps)
-
-
-def _canonical_axis(axis: int, ndim: int, name: str) -> int:
-    if not isinstance(axis, int):
-        raise TypeError(f'{name} must be an integer')
-    canonical = axis + ndim if axis < 0 else axis
-    if canonical < 0 or canonical >= ndim:
-        raise ValueError(f'{name} {axis} is invalid for an array of rank {ndim}')
-    return canonical
-
-
-def _canonical_axes(axes: Axes, ndim: int) -> tuple[int, ...]:
-    values = (axes,) if isinstance(axes, int) else tuple(axes)
-    if not values:
-        raise ValueError('axes must contain at least one axis')
-    canonical = tuple(
-        _canonical_axis(axis, ndim, 'axis')
-        for axis in values
-    )
-    if len(set(canonical)) != len(canonical):
-        raise ValueError('axes must not contain duplicates')
-    return canonical
-
 
 def _default_axes(rank: int) -> tuple[int, ...]:
     return tuple(range(-rank, 0))
@@ -133,16 +100,6 @@ def _validate_floating(x: jax.Array) -> None:
         raise TypeError('normalization requires a floating-point input')
 
 
-def _constrain(
-    value: jax.Array,
-    sharding: jax.sharding.Sharding | None,
-    shard_mode: ShardMode,
-) -> jax.Array:
-    if shard_mode == ShardMode.EXPLICIT and sharding is not None:
-        return jax.lax.with_sharding_constraint(value, sharding)
-    return value
-
-
 class LayerNorm(Module):
     """Normalize one or more activation dimensions by mean and variance."""
 
@@ -160,13 +117,16 @@ class LayerNorm(Module):
         axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.normalized_shape = _normalized_shape(normalized_shape)
+        self.normalized_shape = _normalize_shape(
+            normalized_shape,
+            'normalized_shape',
+        )
         self.hidden_size = (
             self.normalized_shape[0]
             if len(self.normalized_shape) == 1
             else self.normalized_shape
         )
-        self.eps = _validate_eps(eps)
+        self.eps = _validate_positive_float(eps, 'eps')
         self.elementwise_affine = bool(elementwise_affine)
         self.has_bias = self.elementwise_affine and bool(bias)
         requested_axes = (
@@ -253,13 +213,16 @@ class RMSNorm(Module):
         *,
         axes: Axes | None = None,
     ) -> None:
-        self.normalized_shape = _normalized_shape(normalized_shape)
+        self.normalized_shape = _normalize_shape(
+            normalized_shape,
+            'normalized_shape',
+        )
         self.hidden_size = (
             self.normalized_shape[0]
             if len(self.normalized_shape) == 1
             else self.normalized_shape
         )
-        self.eps = _validate_eps(eps)
+        self.eps = _validate_positive_float(eps, 'eps')
         self.with_scale = bool(with_scale)
         requested_axes = (
             _default_axes(len(self.normalized_shape))
@@ -342,8 +305,8 @@ class BatchNorm(Module):
         collective_axis_name: MeshAxisName = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.num_features = _positive_integer(num_features, 'num_features')
-        self.eps = _validate_eps(eps)
+        self.num_features = _validate_integer(num_features, 'num_features')
+        self.eps = _validate_positive_float(eps, 'eps')
         if momentum is not None:
             if not math.isfinite(momentum) or not 0 <= momentum <= 1:
                 raise ValueError('momentum must be None or between 0 and 1')
@@ -393,7 +356,7 @@ class BatchNorm(Module):
         channel_axis = _canonical_axis(
             self.channel_axis,
             x.ndim,
-            'channel_axis',
+            name='channel_axis',
         )
         if x.shape[channel_axis] != self.num_features:
             raise ValueError(
@@ -473,14 +436,11 @@ class BatchNorm(Module):
     ) -> jax.Array:
         x = jnp.asarray(x)
         _validate_floating(x)
-        if training is None:
-            training = self.training
-        elif not isinstance(training, bool):
-            raise TypeError('training must be a bool or None')
+        training = _resolve_training(self.training, training)
         channel_axis = _canonical_axis(
             self.channel_axis,
             x.ndim,
-            'channel_axis',
+            name='channel_axis',
         )
         if x.shape[channel_axis] != self.num_features:
             raise ValueError(
@@ -545,14 +505,14 @@ class GroupNorm(Module):
         axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.num_groups = _positive_integer(num_groups, 'num_groups')
-        self.num_channels = _positive_integer(num_channels, 'num_channels')
+        self.num_groups = _validate_integer(num_groups, 'num_groups')
+        self.num_channels = _validate_integer(num_channels, 'num_channels')
         if self.num_channels % self.num_groups != 0:
             raise ValueError(
                 f'num_channels ({num_channels}) must be divisible by '
                 f'num_groups ({num_groups})'
             )
-        self.eps = _validate_eps(eps)
+        self.eps = _validate_positive_float(eps, 'eps')
         self.affine = bool(affine)
         self.has_bias = self.affine and bool(bias)
         self.channel_axis = channel_axis
@@ -582,7 +542,7 @@ class GroupNorm(Module):
         channel_axis = _canonical_axis(
             self.channel_axis,
             x.ndim,
-            'channel_axis',
+            name='channel_axis',
         )
         if x.shape[channel_axis] != self.num_channels:
             raise ValueError(
@@ -599,7 +559,7 @@ class GroupNorm(Module):
             batch_axis = _canonical_axis(
                 self.batch_axis,
                 x.ndim,
-                'batch_axis',
+                name='batch_axis',
             )
             if batch_axis == channel_axis:
                 raise ValueError('batch_axis and channel_axis must be different')

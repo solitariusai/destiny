@@ -18,18 +18,18 @@ TODO: rewrite this file
 from __future__ import annotations
 from typing import Any
 import jax, jax.numpy as jnp
-from typing import Callable
 
 from taktiny.utils.typing import AxisNames, ShardMode
 from taktiny import nn
-from taktiny.utils.typing import DType
+from taktiny.nn.utils import _resolve_activation
+from taktiny.utils.typing import Activation, DType
 
 class GateMLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
-        activation: Callable | str = jax.nn.silu,
+        activation: Activation = jax.nn.silu,
         bias: bool = False,
         dtype: DType | None = None,
         rngs: nn.Rngs | None = None,
@@ -40,7 +40,7 @@ class GateMLP(nn.Module):
         quant: Any = None,
         dot_general: Any = None,
     ) -> None:
-        self.activation = activation if isinstance(activation, Callable) else getattr(jax.nn, activation)
+        self.activation = _resolve_activation(activation)
 
         self.gate_proj = nn.Linear(
             hidden_size, intermediate_size,
@@ -77,7 +77,7 @@ class FusedGateMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        activation: Callable | str = jax.nn.silu,
+        activation: Activation = jax.nn.silu,
         bias: bool = False,
         dtype: str | None = None,
         seed: nn.Rngs | None = None,
@@ -87,7 +87,7 @@ class FusedGateMLP(nn.Module):
         quant: Any=None,
         dot_general: Any=None,
     ) -> None:
-        self.activation = activation if isinstance(activation, Callable) else getattr(jax.nn, activation)
+        self.activation = _resolve_activation(activation)
 
         self.linear_in = nn.Linear(hidden_size, intermediate_size * 2, bias=bias, dtype=dtype, seed=seed, axis_names=linear_in_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
         self.linear_out = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, seed=seed, axis_names=linear_out_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
@@ -250,13 +250,13 @@ class MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        activation: Callable | str = jax.nn.gelu,
+        activation: Activation = jax.nn.gelu,
         bias: bool = True,
         dtype: str | None = None,
         rngs: nn.Rngs | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
-        self.activation = activation if isinstance(activation, Callable) else getattr(jax.nn, activation)
+        self.activation = _resolve_activation(activation)
         self.fc1 = nn.Linear(hidden_size, intermediate_size, bias=bias, dtype=dtype, rngs=rngs, shard_mode=shard_mode)
         self.fc2 = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, rngs=rngs, shard_mode=shard_mode)
 

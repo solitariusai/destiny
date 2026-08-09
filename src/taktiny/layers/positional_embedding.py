@@ -19,6 +19,7 @@ import math
 import jax
 import jax.numpy as jnp
 from taktiny import nn
+from taktiny.nn.utils import _constrain
 from taktiny.utils.typing import DType, ShardMode
 
 def rotate_half(x: jax.Array) -> jax.Array:
@@ -180,12 +181,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
             )
 
         embedding = embedding.astype(self.dtype)
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            embedding = jax.lax.with_sharding_constraint(
-                embedding,
-                out_sharding,
-            )
-        return embedding
+        return _constrain(embedding, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
         return f'{self.embedding_dim}, max_period={self.max_period:g}'
