@@ -84,7 +84,7 @@ class JointAttentionBlock(nn.Module):
             num_heads=config.num_attention_heads,
             head_dim=config.attention_head_dim,
             use_qkv_norm=True,
-            seed=seed
+            rngs=seed,
         )
 
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=config.eps)
