@@ -19,21 +19,21 @@ import jax
 import jax.numpy as jnp
 from taktiny import nn
 
-def _canonical_dim(dim: int, ndim: int, *, name: str) -> int:
-    if not isinstance(dim, int) or isinstance(dim, bool):
+def _canonical_axis(axis: int, ndim: int, *, name: str) -> int:
+    if not isinstance(axis, int) or isinstance(axis, bool):
         raise TypeError(f'{name} must be an integer')
 
     if ndim == 0:
-        if dim in {-1, 0}:
+        if axis in {-1, 0}:
             return 0
         raise ValueError(
-            f'{name}={dim} is out of range for a scalar input'
+            f'{name}={axis} is out of range for a scalar input'
         )
 
-    canonical = dim + ndim if dim < 0 else dim
+    canonical = axis + ndim if axis < 0 else axis
     if canonical < 0 or canonical >= ndim:
         raise ValueError(
-            f'{name}={dim} is out of range for an input with {ndim} dimensions'
+            f'{name}={axis} is out of range for an input with {ndim} dimensions'
         )
     return canonical
 
@@ -43,42 +43,42 @@ class Flatten(nn.Module):
 
     def __init__(
         self,
-        start_dim: int = 1,
-        end_dim: int = -1,
+        start_axis: int = 1,
+        end_axis: int = -1,
     ) -> None:
-        if not isinstance(start_dim, int) or isinstance(start_dim, bool):
-            raise TypeError('start_dim must be an integer')
-        if not isinstance(end_dim, int) or isinstance(end_dim, bool):
-            raise TypeError('end_dim must be an integer')
-        self.start_dim = start_dim
-        self.end_dim = end_dim
+        if not isinstance(start_axis, int) or isinstance(start_axis, bool):
+            raise TypeError('start_axis must be an integer')
+        if not isinstance(end_axis, int) or isinstance(end_axis, bool):
+            raise TypeError('end_axis must be an integer')
+        self.start_axis = start_axis
+        self.end_axis = end_axis
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        start_dim = _canonical_dim(
-            self.start_dim,
+        start_axis = _canonical_axis(
+            self.start_axis,
             x.ndim,
-            name='start_dim',
+            name='start_axis',
         )
-        end_dim = _canonical_dim(
-            self.end_dim,
+        end_axis = _canonical_axis(
+            self.end_axis,
             x.ndim,
-            name='end_dim',
+            name='end_axis',
         )
-        if start_dim > end_dim:
+        if start_axis > end_axis:
             raise ValueError(
-                'start_dim must refer to a dimension before or equal to end_dim'
+                'start_axis must refer to an axis before or equal to end_axis'
             )
 
-        flattened_size = math.prod(x.shape[start_dim:end_dim + 1])
+        flattened_size = math.prod(x.shape[start_axis:end_axis + 1])
         shape = (
-            *x.shape[:start_dim],
+            *x.shape[:start_axis],
             flattened_size,
-            *x.shape[end_dim + 1:],
+            *x.shape[end_axis + 1:],
         )
         return jnp.reshape(x, shape)
 
     def extra_repr(self) -> str:
-        return f'start_dim={self.start_dim}, end_dim={self.end_dim}'
+        return f'start_axis={self.start_axis}, end_axis={self.end_axis}'
 
 
 class Unflatten(nn.Module):
@@ -86,11 +86,11 @@ class Unflatten(nn.Module):
 
     def __init__(
         self,
-        dim: int,
+        axis: int,
         unflattened_size: int | Sequence[int],
     ) -> None:
-        if not isinstance(dim, int) or isinstance(dim, bool):
-            raise TypeError('dim must be an integer')
+        if not isinstance(axis, int) or isinstance(axis, bool):
+            raise TypeError('axis must be an integer')
         if isinstance(unflattened_size, int):
             unflattened_size = (unflattened_size,)
         elif isinstance(unflattened_size, Sequence) and not isinstance(
@@ -117,15 +117,15 @@ class Unflatten(nn.Module):
         if unflattened_size.count(-1) > 1:
             raise ValueError('only one unflattened dimension may be inferred')
 
-        self.dim = dim
+        self.axis = axis
         self.unflattened_size = unflattened_size
 
     def __call__(self, x: jax.Array) -> jax.Array:
         if x.ndim == 0:
             raise ValueError('cannot unflatten a scalar input')
-        dim = _canonical_dim(self.dim, x.ndim, name='dim')
+        axis = _canonical_axis(self.axis, x.ndim, name='axis')
         sizes = self.unflattened_size
-        flattened_size = x.shape[dim]
+        flattened_size = x.shape[axis]
 
         if -1 in sizes:
             known_size = math.prod(size for size in sizes if size != -1)
@@ -150,11 +150,11 @@ class Unflatten(nn.Module):
                 f'into {sizes}'
             )
 
-        shape = (*x.shape[:dim], *sizes, *x.shape[dim + 1:])
+        shape = (*x.shape[:axis], *sizes, *x.shape[axis + 1:])
         return jnp.reshape(x, shape)
 
     def extra_repr(self) -> str:
-        return f'dim={self.dim}, unflattened_size={self.unflattened_size}'
+        return f'axis={self.axis}, unflattened_size={self.unflattened_size}'
 
 
 __all__ = ['Flatten', 'Unflatten']

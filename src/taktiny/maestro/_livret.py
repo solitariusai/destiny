@@ -15,7 +15,6 @@
 from __future__ import annotations
 from typing import Any
 
-
 class Repertoire:
     def __init__(self) -> None:
         self._repertoire = {}
