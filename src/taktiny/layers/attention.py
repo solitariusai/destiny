@@ -21,7 +21,6 @@ import jax.numpy as jnp
 import math
 
 from taktiny import nn
-from taktiny.layers.positional_embedding import RotaryEmbedding
 from taktiny.utils.typing import AxisNames, DType, ShardMode, Sharding
 
 class SegmentIds(NamedTuple):
@@ -54,10 +53,10 @@ class Attention(nn.Module):
         o_bias: bool | None = None,
         scaling: float | None = None,
         softcap: float | None = None,
-        dropout: float | int = 0.0,
+        dropout: float = 0.0,
         shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any=None,
-        dot_general: Any=None,
+        quant: Any = None,
+        dot_general: Any = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -277,6 +276,77 @@ class Attention(nn.Module):
         if mask is None:
             return segment_mask
         return jnp.asarray(mask, dtype=jnp.bool_) & segment_mask
+
+    @staticmethod
+    def _segments_from_positions(
+        position_idx: jax.Array | None,
+        *,
+        batch_size: int,
+        sequence_length: int,
+    ) -> SegmentIds | None:
+        if position_idx is None:
+            return None
+        token_positions = jnp.asarray(position_idx, dtype=jnp.int32)
+        if token_positions.ndim != 2:
+            return None
+        expected_shape = (batch_size, sequence_length)
+        if token_positions.shape != expected_shape:
+            raise ValueError(
+                f'position_idx must have shape {expected_shape}, got '
+                f'{token_positions.shape}'
+            )
+        packed_segments = jnp.cumsum(
+            token_positions == 0,
+            axis=-1,
+            dtype=jnp.int32,
+        )
+        return SegmentIds(packed_segments, packed_segments)
+
+    @staticmethod
+    def _prefix_lengths_from_mask(
+        mask: jax.Array | None,
+        *,
+        batch_size: int,
+        key_length: int,
+    ) -> jax.Array:
+        if mask is None:
+            return jnp.full((batch_size,), key_length, dtype=jnp.int32)
+        mask = jnp.asarray(mask, dtype=jnp.bool_)
+        if mask.shape[-1] != key_length:
+            raise ValueError(
+                'ragged decode mask key dimension must match the KV cache, '
+                f'got {mask.shape[-1]} and {key_length}'
+            )
+        if mask.ndim == 1:
+            mask = jnp.broadcast_to(mask, (batch_size, key_length))
+        elif mask.ndim == 2:
+            try:
+                mask = jnp.broadcast_to(mask, (batch_size, key_length))
+            except ValueError as error:
+                raise ValueError(
+                    'ragged decode mask must be broadcastable to [batch, key]'
+                ) from error
+        elif mask.ndim == 3 and mask.shape[-2] == 1:
+            mask = mask[:, 0, :]
+        elif (
+            mask.ndim == 4
+            and mask.shape[-3] == 1
+            and mask.shape[-2] == 1
+        ):
+            mask = mask[:, 0, 0, :]
+        else:
+            raise ValueError(
+                'ragged decode requires a prefix mask shared across query '
+                'heads with shape [key], [batch, key], [batch, 1, key], or '
+                '[batch, 1, 1, key]'
+            )
+        try:
+            mask = jnp.broadcast_to(mask, (batch_size, key_length))
+        except ValueError as error:
+            raise ValueError(
+                'ragged decode mask batch dimension does not match the query'
+            ) from error
+        return jnp.sum(mask, axis=-1, dtype=jnp.int32)
 
     @classmethod
     def apply_flash_attention(
@@ -516,9 +586,7 @@ class Attention(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply a prebuilt Ring Splash Attention kernel."""
-        from taktiny.kernels.attention.tokamax_splash import (
-            ring_attention_kernel,
-        )
+        from taktiny.kernels.attention.tokamax_splash import ring_attention_kernel
 
         (
             batch_size,
@@ -720,25 +788,11 @@ class Attention(nn.Module):
 
         q = self._scale_query(q, position_idx)
 
-        segment_ids = None
-        if position_idx is not None:
-            token_positions = jnp.asarray(position_idx, dtype=jnp.int32)
-            if token_positions.ndim == 2:
-                expected_shape = (q.shape[0], q.shape[1])
-                if token_positions.shape != expected_shape:
-                    raise ValueError(
-                        'position_ids must have shape '
-                        f'{expected_shape}, got {token_positions.shape}'
-                    )
-                packed_segments = jnp.cumsum(
-                    token_positions == 0,
-                    axis=-1,
-                    dtype=jnp.int32,
-                )
-                segment_ids = SegmentIds(
-                    packed_segments,
-                    packed_segments,
-                )
+        segment_ids = self._segments_from_positions(
+            position_idx,
+            batch_size=q.shape[0],
+            sequence_length=q.shape[1],
+        )
 
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
@@ -859,6 +913,22 @@ class Attention(nn.Module):
                 # The absolute-position mask handles causality itself.
                 is_causal = False
 
+        ragged_lengths = None
+        if isinstance(kernel, str) and kernel.lower() in {
+            'ragged',
+            'ragged_attention',
+        }:
+            if self.window_size is not None:
+                raise ValueError(
+                    'ragged attention cannot represent a sliding-window mask'
+                )
+            ragged_lengths = self._prefix_lengths_from_mask(
+                attention_mask,
+                batch_size=q.shape[0],
+                key_length=k.shape[1],
+            )
+            attention_mask = None
+
         attention_bias = None
         if self.softcap is not None:
             scale = (
@@ -899,6 +969,11 @@ class Attention(nn.Module):
             scale=self.scaling,
             is_causal=is_causal,
             segment_ids=segment_ids,
+            **(
+                {'lengths': ragged_lengths}
+                if ragged_lengths is not None
+                else {}
+            ),
         )
 
         # Output projection from (Batch, SeqLen, Heads, HeadDim) directly to (Batch, SeqLen, HiddenSize)
@@ -921,7 +996,9 @@ class JointAttention(nn.Module):
 
     Inputs use ``[batch, sequence, hidden]`` layout. ``attention_mask`` and
     ``attention_bias`` describe the concatenated sequence of length
-    ``sequence1 + sequence2``.
+    ``sequence1 + sequence2``. A two-dimensional ``position_idx`` may contain
+    reset positions such as ``[0, 1, 2, 0, 1]``; resets are converted to an
+    internal segment mask so packed examples cannot attend to each other.
     """
 
     def __init__(
@@ -1083,21 +1160,6 @@ class JointAttention(nn.Module):
             )
         return x1, x2
 
-    @staticmethod
-    def _joint_position_idx(
-        position_idx: jax.Array | tuple[jax.Array, jax.Array] | None,
-    ) -> jax.Array | None:
-        if position_idx is None or not isinstance(position_idx, tuple):
-            return position_idx
-        if len(position_idx) != 2:
-            raise ValueError('position_idx must contain exactly two arrays')
-        first, second = map(jnp.asarray, position_idx)
-        if first.ndim != second.ndim or first.shape[:-1] != second.shape[:-1]:
-            raise ValueError(
-                'per-stream position arrays must have matching leading shapes'
-            )
-        return jnp.concatenate((first, second), axis=-1)
-
     def __call__(
         self,
         x1: jax.Array,
@@ -1105,8 +1167,7 @@ class JointAttention(nn.Module):
         attention_mask: jax.Array | None = None,
         attention_bias: jax.Array | None = None,
         is_causal: bool = False,
-        segment_ids: SegmentIds | jax.Array | None = None,
-        position_idx: jax.Array | tuple[jax.Array, jax.Array] | None = None,
+        position_idx: jax.Array | None = None,
         out_shardings: tuple[Sharding, Sharding] | None = None,
         kernel: str = 'dot_product',
         **kernel_kwargs: Any,
@@ -1130,8 +1191,14 @@ class JointAttention(nn.Module):
         k = jnp.concatenate((k1, k2), axis=1)
         v = jnp.concatenate((v1, v2), axis=1)
 
+        segment_ids = Attention._segments_from_positions(
+            position_idx,
+            batch_size=q.shape[0],
+            sequence_length=q.shape[1],
+        )
+
         if self.pos_emb is not None:
-            q, k = self.pos_emb(q, k, self._joint_position_idx(position_idx))
+            q, k = self.pos_emb(q, k, position_idx)
 
         out = Attention.apply(
             query=q,

@@ -47,7 +47,7 @@ DecodeCarry = tuple[
     jax.Array,
     jax.Array,
 ]
-GenerationSettings = tuple[int, jax.Array, int]
+GenerationSettings = tuple[int, jax.Array, int, str]
 
 
 def _approximate_gelu(x: jax.Array) -> jax.Array:
@@ -57,7 +57,7 @@ def _approximate_gelu(x: jax.Array) -> jax.Array:
 @partial(
     jax.tree_util.register_dataclass,
     data_fields=['key_cache', 'value_cache', 'position_idx'],
-    meta_fields=['is_causal'],
+    meta_fields=['is_causal', 'attention_kernel'],
 )
 @dataclass(frozen=True)
 class TransformerContext:
@@ -65,6 +65,7 @@ class TransformerContext:
     value_cache: tp.Optional[jax.Array] = None
     position_idx: tp.Optional[jax.Array] = None
     is_causal: tp.Optional[bool] = None
+    attention_kernel: str = 'dot_product'
 
 class TransformerDecoderLayer(nn.Module):
     """An ordered transformer decoder block assembled from module types.
@@ -359,6 +360,7 @@ class TransformerDecoderLayer(nn.Module):
         position_idx: jax.Array | None = None,
         is_causal: bool = False,
         out_sharding: jax.sharding.Sharding | None = None,
+        attention_kernel: str = 'dot_product',
     ) -> tuple[jax.Array, KVCache | None]:
         residual = x
         pending = None
@@ -409,6 +411,7 @@ class TransformerDecoderLayer(nn.Module):
                     kv_cache=kv_cache,
                     position_idx=position_idx,
                     out_sharding=out_sharding,
+                    kernel=attention_kernel,
                 )
             else:
                 pending = module(x, out_sharding=out_sharding)
@@ -557,6 +560,7 @@ class TransformerModel(nn.Module):
         position_idx: jax.Array | None = None,
         is_causal: bool = False,
         out_sharding: jax.sharding.Sharding | None = None,
+        attention_kernel: str = 'dot_product',
     ) -> tuple[jax.Array, KVCache | None]:
         if not jnp.issubdtype(x.dtype, jnp.inexact):
             if isinstance(self.embed_tokens, nn.Embedding):
@@ -572,6 +576,7 @@ class TransformerModel(nn.Module):
                 position_idx=position_idx,
                 is_causal=is_causal,
                 out_sharding=out_sharding,
+                attention_kernel=attention_kernel,
             )
 
         if self.remat:
@@ -824,9 +829,11 @@ class TransformerCausalLM(PretrainedModel):
         kv_cache = None
         position_idx = None
         is_causal = False
+        attention_kernel = 'dot_product'
         if ctx is not None:
             position_idx = ctx.position_idx
             is_causal = ctx.is_causal
+            attention_kernel = ctx.attention_kernel
             if (ctx.key_cache is None) != (ctx.value_cache is None):
                 raise ValueError(
                     'TransformerContext should contain both key and value caches'
@@ -849,6 +856,7 @@ class TransformerCausalLM(PretrainedModel):
             position_idx=position_idx,
             is_causal=is_causal,
             out_sharding=self.model_out_sharding,
+            attention_kernel=attention_kernel,
         )
 
         if isinstance(logits_to_keep, int):
@@ -1023,7 +1031,134 @@ class TransformerCausalLM(PretrainedModel):
         sampled_tokens = jax.random.categorical(key, logits)[:, None]
         return jnp.where(temperature <= 0, greedy_tokens, sampled_tokens)
 
-    @partial(jax.jit, static_argnames=['max_seq_len', 'top_k', 'top_p'])
+    @staticmethod
+    def _canonical_attention_kernel(kernel: str) -> str:
+        if not isinstance(kernel, str):
+            raise TypeError('attention kernel names must be strings')
+        normalized = kernel.lower()
+        aliases = {
+            'standard': 'dot_product',
+            'jax': 'dot_product',
+            'flash_attention': 'flash',
+            'ragged_attention': 'ragged',
+            'splash_attention': 'splash',
+            'ring_attention': 'ring',
+        }
+        normalized = aliases.get(normalized, normalized)
+        supported = {
+            'auto',
+            'dot_product',
+            'flash',
+            'ragged',
+            'splash',
+            'ring',
+        }
+        if normalized not in supported:
+            choices = ', '.join(sorted(supported))
+            raise ValueError(
+                f'unsupported attention kernel {kernel!r}; choose from '
+                f'{choices}'
+            )
+        return normalized
+
+    def _resolve_generation_attention_kernels(
+        self,
+        attention_kernel: str | Mapping[str, str],
+    ) -> tuple[str, str]:
+        if isinstance(attention_kernel, str):
+            prefill = decode = self._canonical_attention_kernel(
+                attention_kernel
+            )
+        elif isinstance(attention_kernel, Mapping):
+            unknown = set(attention_kernel) - {'prefill', 'decode'}
+            if unknown:
+                names = ', '.join(sorted(map(str, unknown)))
+                raise ValueError(
+                    f'unknown attention_kernel phase keys: {names}'
+                )
+            prefill = self._canonical_attention_kernel(
+                attention_kernel.get('prefill', 'auto')
+            )
+            decode = self._canonical_attention_kernel(
+                attention_kernel.get('decode', 'auto')
+            )
+        else:
+            raise TypeError(
+                'attention_kernel must be a string or a mapping with '
+                'prefill and decode keys'
+            )
+
+        softcap = getattr(self.config, 'attn_logit_softcapping', None)
+        backend = jax.default_backend()
+        layer_types = getattr(self.config, 'layer_types', None) or ()
+        use_sliding_window = getattr(
+            self.config,
+            'use_sliding_window',
+            None,
+        )
+        has_sliding_window = bool(
+            use_sliding_window is True
+            or (
+                use_sliding_window is None
+                and getattr(self.config, 'sliding_window', None)
+            )
+            or any(
+                layer_type in ('sliding_attention', 'sliding')
+                for layer_type in layer_types
+            )
+        )
+
+        if prefill == 'auto':
+            prefill = 'dot_product' if softcap is not None else 'flash'
+        if decode == 'auto':
+            decode = (
+                'ragged'
+                if (
+                    backend == 'tpu'
+                    and softcap is None
+                    and not has_sliding_window
+                )
+                else 'dot_product'
+            )
+
+        if prefill == 'ragged':
+            raise ValueError(
+                'ragged attention is decode-only; select it only for the '
+                'decode phase'
+            )
+        if 'ring' in (prefill, decode):
+            raise ValueError(
+                'ring attention requires a prebuilt topology-specific kernel '
+                'and cannot be selected directly by generate'
+            )
+        if softcap is not None:
+            unsupported = {
+                kernel
+                for kernel in (prefill, decode)
+                if kernel != 'dot_product'
+            }
+            if unsupported:
+                names = ', '.join(sorted(unsupported))
+                raise ValueError(
+                    f'{names} attention does not support the model attention '
+                    'softcap; use dot_product'
+                )
+        if decode == 'ragged' and has_sliding_window:
+            raise ValueError(
+                'ragged attention cannot represent sliding-window decode '
+                'masks; use dot_product, flash, or splash'
+            )
+        return prefill, decode
+
+    @partial(
+        jax.jit,
+        static_argnames=[
+            'max_seq_len',
+            'top_k',
+            'top_p',
+            'attention_kernel',
+        ],
+    )
     def _decode_step(
         self,
         carry: DecodeCarry,
@@ -1034,6 +1169,7 @@ class TransformerCausalLM(PretrainedModel):
         repetition_penalty: float = 1.0,
         eos_token_ids: jax.Array | None = None,
         pad_token_id: int = 0,
+        attention_kernel: str = 'dot_product',
     ) -> tuple[DecodeCarry, jax.Array]:
         (
             token,
@@ -1049,7 +1185,8 @@ class TransformerCausalLM(PretrainedModel):
             key_cache=k_cache,
             value_cache=v_cache,
             position_idx=pos,
-            is_causal=False
+            is_causal=False,
+            attention_kernel=attention_kernel,
         )
 
         mask = jnp.arange(max_seq_len)[None, :] <= pos[:, None]
@@ -1117,6 +1254,7 @@ class TransformerCausalLM(PretrainedModel):
         eos_token_id: int | Sequence[int] | None,
         pad_token_id: int | None,
         seed: int,
+        attention_kernel: str | Mapping[str, str],
     ) -> tuple[jax.Array, DecodeCarry, GenerationSettings]:
         if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
             raise ValueError('max_new_tokens should be a positive integer')
@@ -1126,6 +1264,9 @@ class TransformerCausalLM(PretrainedModel):
             raise ValueError('top_p should be in the interval (0, 1]')
         if repetition_penalty <= 0:
             raise ValueError('repetition_penalty should be positive')
+        prefill_kernel, decode_kernel = (
+            self._resolve_generation_attention_kernels(attention_kernel)
+        )
 
         input_ids = jnp.asarray(input_ids)
         if input_ids.ndim != 2:
@@ -1225,6 +1366,7 @@ class TransformerCausalLM(PretrainedModel):
             value_cache=value_cache,
             position_idx=jnp.asarray(0, dtype=jnp.int32),
             is_causal=True,
+            attention_kernel=prefill_kernel,
         )
         prefill_mask = (
             jnp.arange(max_seq_len)[None, :]
@@ -1287,6 +1429,7 @@ class TransformerCausalLM(PretrainedModel):
             max_seq_len,
             eos_token_ids,
             pad_token_id,
+            decode_kernel,
         )
         return input_ids, carry, settings
 
@@ -1303,7 +1446,16 @@ class TransformerCausalLM(PretrainedModel):
         eos_token_id: int | Sequence[int] | None = None,
         pad_token_id: int | None = None,
         streamer: tp.Any = None,
+        attention_kernel: str | Mapping[str, str] = 'auto',
     ) -> jax.Array:
+        """Generate tokens with phase-aware attention kernel selection.
+
+        ``attention_kernel`` may be one kernel name for both generation phases,
+        or a mapping such as ``{'prefill': 'flash', 'decode': 'ragged'}``.
+        ``'auto'`` selects Flash Attention for prefill and TPU Ragged Attention
+        for compatible cached decoding. Other backends, attention softcaps,
+        and sliding-window decoding use dot-product attention.
+        """
         if not isinstance(max_new_tokens, int) or max_new_tokens < 0:
             raise ValueError('max_new_tokens should be a non-negative integer')
 
@@ -1328,6 +1480,7 @@ class TransformerCausalLM(PretrainedModel):
                     repetition_penalty=repetition_penalty,
                     eos_token_id=eos_token_id,
                     pad_token_id=pad_token_id,
+                    attention_kernel=attention_kernel,
                 ):
                     streamer.put(jax.device_get(token_ids))
                     generated.append(token_ids)
@@ -1355,8 +1508,14 @@ class TransformerCausalLM(PretrainedModel):
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             seed=seed,
+            attention_kernel=attention_kernel,
         )
-        max_seq_len, eos_token_ids, pad_token_id = settings
+        (
+            max_seq_len,
+            eos_token_ids,
+            pad_token_id,
+            decode_kernel,
+        ) = settings
         batch_size = input_ids.shape[0]
         generated = jnp.full(
             (batch_size, max_new_tokens),
@@ -1384,6 +1543,7 @@ class TransformerCausalLM(PretrainedModel):
                 repetition_penalty=repetition_penalty,
                 eos_token_ids=eos_token_ids,
                 pad_token_id=pad_token_id,
+                attention_kernel=decode_kernel,
             )
             tokens = tokens.at[:, step].set(next_token[:, 0])
             return step + 1, decode_carry, tokens
@@ -1411,8 +1571,9 @@ class TransformerCausalLM(PretrainedModel):
         repetition_penalty: float = 1.0,
         eos_token_id: int | Sequence[int] | None = None,
         pad_token_id: int | None = None,
+        attention_kernel: str | Mapping[str, str] = 'auto',
     ) -> Iterator[jax.Array]:
-        """Yield one generated token per batch row at each decode step."""
+        """Yield generated tokens using the same kernel policy as ``generate``."""
         if max_new_tokens == 0:
             return
 
@@ -1427,8 +1588,14 @@ class TransformerCausalLM(PretrainedModel):
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             seed=seed,
+            attention_kernel=attention_kernel,
         )
-        max_seq_len, eos_token_ids, pad_token_id = settings
+        (
+            max_seq_len,
+            eos_token_ids,
+            pad_token_id,
+            decode_kernel,
+        ) = settings
         yield carry[0]
 
         for _ in range(max_new_tokens - 1):
@@ -1443,6 +1610,7 @@ class TransformerCausalLM(PretrainedModel):
                 repetition_penalty=repetition_penalty,
                 eos_token_ids=eos_token_ids,
                 pad_token_id=pad_token_id,
+                attention_kernel=decode_kernel,
             )
             yield next_token
 
@@ -1758,6 +1926,7 @@ class TransformerConditionalGeneration(PretrainedModel):
         eos_token_id: int | list[int] | tuple[int, ...] | None = None,
         pad_token_id: int | None = None,
         seed: int = 42,
+        attention_kernel: str | Mapping[str, str] = 'auto',
     ) -> jax.Array:
         """Autoregressively generate tokens conditioned on text and optional multimodal inputs."""
         if self.language_model is not None and hasattr(self.language_model, 'generate'):
@@ -1779,6 +1948,7 @@ class TransformerConditionalGeneration(PretrainedModel):
                 eos_token_id=eos_token_id,
                 pad_token_id=pad_token_id,
                 seed=seed,
+                attention_kernel=attention_kernel,
             )
         else:
             raise NotImplementedError("Generation requires a configured language_model")
