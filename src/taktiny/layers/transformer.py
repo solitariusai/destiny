@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from taktiny import nn
 from taktiny.layers.attention import Attention
-from taktiny.nn.utils import (
+from taktiny.nn._continuo import (
     _constrain,
     _resolve_activation,
     _resolve_training,

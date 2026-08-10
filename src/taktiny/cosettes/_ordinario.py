@@ -24,7 +24,7 @@ from dataclasses import replace
 from functools import partial
 
 from taktiny import nn
-from taktiny.cosettes._base import PretrainedModel
+from taktiny.cosettes._overture import PretrainedModel
 from taktiny.maestro.config import ModelConfig
 from taktiny.utils.typing import (
     ArrayLike,

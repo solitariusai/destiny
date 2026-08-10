@@ -760,8 +760,8 @@ class PretrainedModel(Module):
     def from_pretrained(
         cls,
         path_or_repo: PathLike,
-        *,
         config: tp.Any,
+        *,
         module_map: tp.List | None = None,
         local: bool = False,
         dtype: DType | None = None,

@@ -21,7 +21,7 @@ import jax, jax.numpy as jnp
 
 from taktiny.utils.typing import AxisNames, ShardMode
 from taktiny import nn
-from taktiny.nn.utils import _resolve_activation
+from taktiny.nn._continuo import _resolve_activation
 from taktiny.utils.typing import Activation, DType
 
 class GateMLP(nn.Module):

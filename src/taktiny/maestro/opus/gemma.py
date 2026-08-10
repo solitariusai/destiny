@@ -19,7 +19,7 @@ import typing as tp
 import jax.numpy as jnp, jax
 
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes.common import (
+from taktiny.cosettes._ordinario import (
     TransformerCausalLM,
     TransformerConditionalGeneration,
     DiffusionLM,

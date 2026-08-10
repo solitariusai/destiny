@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny.nn.module import Module, Parameter
-from taktiny.nn.utils import (
+from taktiny.nn._continuo import (
     _canonical_axis,
     _canonical_axes,
     _constrain,

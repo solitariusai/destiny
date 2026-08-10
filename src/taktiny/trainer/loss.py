@@ -20,7 +20,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from taktiny.cosettes.common import TransformerContext
+from taktiny.cosettes._ordinario import TransformerContext
 from taktiny.utils.typing import Array, ArrayLike, Batch
 
 

@@ -22,9 +22,6 @@ import typing as tp
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from huggingface_hub import hf_hub_download
-import json
-import os, sys
 
 from taktiny.maestro._livret import repertoire
 from taktiny.maestro.config import ModelConfig
