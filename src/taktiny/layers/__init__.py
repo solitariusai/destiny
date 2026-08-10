@@ -18,5 +18,4 @@ from .ffn import *
 from .normalization import *
 from .positional_embedding import *
 from .recurrent import *
-from .resnet import *
 from .transformer import *
