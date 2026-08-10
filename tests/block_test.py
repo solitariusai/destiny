@@ -46,6 +46,22 @@ def test_list_is_a_jax_pytree():
     assert all(isinstance(leaf, jax.Array) for leaf in leaves)
 
 
+def test_list_slice_preserves_container_and_parameter_paths():
+    class Model(nn.Module):
+        def __init__(self):
+            self.layers = nn.List([Add(1), Add(2), Add(3)])
+
+    model = Model()
+    model.layers = model.layers[:2]
+
+    assert isinstance(model.layers, nn.List)
+    assert len(model.layers) == 2
+    assert set(model.flat_parameter_dict()) == {
+        'layers.0.value',
+        'layers.1.value',
+    }
+
+
 def test_list_rejects_non_sequence_and_non_module_elements():
     with pytest.raises(TypeError, match='must be a sequence'):
         nn.List(Add(index) for index in range(2))
@@ -62,6 +78,14 @@ def test_sequential_accepts_one_module_sequence():
     assert len(modules) == 2
     assert list(modules) == list(modules.layers)
     assert modules[0] is modules.layers[0]
+
+
+def test_sequential_slice_preserves_container_behavior():
+    modules = nn.Sequential([Add(1), Add(2), Add(3)])[:2]
+
+    assert isinstance(modules, nn.Sequential)
+    assert len(modules) == 2
+    assert jax.jit(modules)(jnp.asarray(3)) == 6
 
 
 def test_sequential_rejects_non_sequence_and_non_module_elements():

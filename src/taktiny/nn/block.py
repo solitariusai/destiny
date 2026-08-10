@@ -23,7 +23,7 @@ from collections.abc import (
     Sequence,
     ValuesView,
 )
-from typing import Any
+from typing import Any, overload
 import jax
 import jax.numpy as jnp
 from taktiny import transforms as tt
@@ -109,7 +109,15 @@ class List(Module):
         _validate_module_sequence(modules)
         self.layers = list(modules)
 
-    def __getitem__(self, idx: int) -> Module:
+    @overload
+    def __getitem__(self, idx: int) -> Module: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> List: ...
+
+    def __getitem__(self, idx: int | slice) -> Module | List:
+        if isinstance(idx, slice):
+            return List(self.layers[idx])
         return self.layers[idx]
 
     def __len__(self) -> int:
@@ -174,7 +182,15 @@ class Sequential(Module):
         _validate_module_sequence(modules)
         self.layers = tuple(modules)
 
-    def __getitem__(self, idx: int) -> Module:
+    @overload
+    def __getitem__(self, idx: int) -> Module: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> Sequential: ...
+
+    def __getitem__(self, idx: int | slice) -> Module | Sequential:
+        if isinstance(idx, slice):
+            return Sequential(self.layers[idx])
         return self.layers[idx]
 
     def __len__(self) -> int:
