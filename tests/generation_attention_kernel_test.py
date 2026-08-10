@@ -6,7 +6,7 @@ from taktiny.maestro.config import ModelConfig
 from taktiny.maestro.opus.llama import Llama
 
 
-def _model(**config_overrides):
+def _model(*, use_list=False, **config_overrides):
     values = {
         'num_hidden_layers': 1,
         'vocab_size': 32,
@@ -32,7 +32,7 @@ def _model(**config_overrides):
     return Llama(
         ModelConfig(**values),
         rngs=nn.Rngs(0),
-        use_list=False,
+        use_list=use_list,
     )
 
 
@@ -169,3 +169,19 @@ def test_generation_attention_kernel_auto_uses_dense_decode_off_tpu(
         model._resolve_generation_attention_kernels(
             {'prefill': 'flash', 'decode': 'ragged'}
         )
+
+
+def test_generation_uses_current_sliced_layer_count():
+    model = _model(num_hidden_layers=3, use_list=True)
+    model.model.layers = model.model.layers[:2]
+
+    output = model.generate(
+        jnp.asarray([[1, 2, 3]], dtype=jnp.int32),
+        max_new_tokens=2,
+        temperature=0.0,
+        top_k=0,
+        attention_kernel='dot_product',
+    )
+
+    assert isinstance(model.model.layers, nn.List)
+    assert output.shape == (1, 5)

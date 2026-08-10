@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from __future__ import annotations
-from typing import Any
+import typing as tp
 import os
 import json
 import re
@@ -32,7 +32,7 @@ from safetensors.flax import save_file
 
 from taktiny.nn import Module, Rngs
 from taktiny.nn.module import iter_children
-from taktiny.utils.typing import AxisNames
+from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 
 
 class PretrainedModel(Module):
@@ -51,7 +51,7 @@ class PretrainedModel(Module):
     checkpoint names and may expose default logical sharding rules.
     """
 
-    def _config_dict(self) -> Any:
+    def _config_dict(self) -> tp.Any:
         config = getattr(self, 'config', None)
         if config is None:
             return {}
@@ -66,7 +66,7 @@ class PretrainedModel(Module):
             if not key.startswith('_')
         }
 
-    def _save_config(self, path: str) -> Any:
+    def _save_config(self, path: str) -> tp.Any:
         config_path = os.path.join(path, 'config.json')
         with open(config_path, 'w') as config_file:
             json.dump(
@@ -78,13 +78,13 @@ class PretrainedModel(Module):
         return config_path
 
     @staticmethod
-    def _qtype_name(qtype: Any) -> Any:
+    def _qtype_name(qtype: tp.Any) -> tp.Any:
         if isinstance(qtype, str):
             return qtype
         return jnp.dtype(qtype).name
 
     @staticmethod
-    def _safetensors_qvalue(array: Any) -> Any:
+    def _safetensors_qvalue(array: tp.Any) -> tp.Any:
         dtype = array.dtype
         if jnp.issubdtype(dtype, jnp.signedinteger):
             storage_dtype = np.int8
@@ -99,7 +99,7 @@ class PretrainedModel(Module):
         return np.asarray(jax.device_get(array), dtype=storage_dtype)
 
     @classmethod
-    def _encode_qwix_state(cls, state: Any) -> tuple[Any, ...]:
+    def _encode_qwix_state(cls, state: tp.Any) -> tuple[tp.Any, ...]:
         encoded = {}
         parameters = {}
 
@@ -140,7 +140,7 @@ class PretrainedModel(Module):
         return encoded, metadata
 
     @staticmethod
-    def _decode_qwix_state(state: Any, metadata: Any) -> Any:
+    def _decode_qwix_state(state: tp.Any, metadata: tp.Any) -> tp.Any:
         if metadata is None:
             return state
         if (
@@ -211,12 +211,12 @@ class PretrainedModel(Module):
             )
         return decoded
 
-    def _lora_state_dict(self) -> Any:
+    def _lora_state_dict(self) -> tp.Any:
         from taktiny.nn.lora import LoRALinear
 
         state = {}
 
-        def collect(module: Any, prefix: str='') -> None:
+        def collect(module: tp.Any, prefix: str='') -> None:
             for name, child in iter_children(module):
                 full_name = f'{prefix}.{name}' if prefix else name
                 if isinstance(child, LoRALinear):
@@ -229,8 +229,8 @@ class PretrainedModel(Module):
         return state
 
     @staticmethod
-    def _host_state_snapshot(state: Any) -> Any:
-        def copy_leaf(value: Any) -> Any:
+    def _host_state_snapshot(state: tp.Any) -> tp.Any:
+        def copy_leaf(value: tp.Any) -> tp.Any:
             value = jax.device_get(value)
             if isinstance(value, np.ndarray):
                 return np.array(value, copy=True)
@@ -238,7 +238,7 @@ class PretrainedModel(Module):
 
         return jax.tree.map(copy_leaf, state)
 
-    def _checkpoint_snapshot(self) -> dict[Any, Any]:
+    def _checkpoint_snapshot(self) -> dict[tp.Any, tp.Any]:
         """Capture stable host state for background checkpoint writing."""
         adapter_state = self._expand_stacked_state_dict(
             self._lora_state_dict()
@@ -267,11 +267,11 @@ class PretrainedModel(Module):
     @classmethod
     def _save_pretrained_snapshot(
         cls,
-        snapshot: Any,
+        snapshot: tp.Any,
         path: str,
         *,
         max_shard_size: str='5GB',
-    ) -> tuple[Any, ...]:
+    ) -> tuple[tp.Any, ...]:
         os.makedirs(path, exist_ok=True)
         model_config_path = os.path.join(path, 'config.json')
         with open(model_config_path, 'w') as config_file:
@@ -331,7 +331,7 @@ class PretrainedModel(Module):
         )
 
     @staticmethod
-    def _expand_stacked_state_dict(state: Any) -> Any:
+    def _expand_stacked_state_dict(state: tp.Any) -> tp.Any:
         layout = []
         stacked_groups = {}
 
@@ -384,13 +384,13 @@ class PretrainedModel(Module):
 
     @staticmethod
     def _save_safetensors(
-        state: Any,
+        state: tp.Any,
         path: str,
-        filename: Any,
+        filename: tp.Any,
         *,
         max_shard_size: int,
         always_write_index: bool=False,
-    ) -> Any:
+    ) -> tp.Any:
         stem, extension = os.path.splitext(filename)
         split = split_state_dict_into_shards_factory(
             state,
@@ -440,7 +440,7 @@ class PretrainedModel(Module):
 
         return tuple(saved_paths)
 
-    def save_pretrained(self, path: str, max_shard_size: str='5GB') -> Any:
+    def save_pretrained(self, path: str, max_shard_size: str='5GB') -> tp.Any:
         """Save a full model checkpoint or the model's LoRA adapters.
 
         Models containing ``LoRALinear`` modules save only adapter tensors and
@@ -466,7 +466,7 @@ class PretrainedModel(Module):
             max_shard_size=max_shard_size,
         )
 
-    def load_pretrained(self, path: str) -> Any:
+    def load_pretrained(self, path: str) -> tp.Any:
         """Load a Taktiny-native full checkpoint into this model in place.
 
         This is the inverse of ``save_pretrained`` for full-model checkpoints.
@@ -634,7 +634,7 @@ class PretrainedModel(Module):
             if isinstance(value, qwix.QArray):
                 target = parameter.value
 
-                def place(component: Any, target_component: Any=None) -> Any:
+                def place(component: tp.Any, target_component: tp.Any=None) -> tp.Any:
                     component = jnp.asarray(component)
                     sharding = getattr(target_component, 'sharding', None)
                     if sharding is not None:
@@ -668,11 +668,11 @@ class PretrainedModel(Module):
         self,
         repo_id: str,
         *,
-        commit_message: Any=None,
-        commit_description: Any=None,
-        private: Any=None,
-        token: Any=None,
-        revision: Any=None,
+        commit_message: tp.Any=None,
+        commit_description: tp.Any=None,
+        private: tp.Any=None,
+        token: tp.Any=None,
+        revision: tp.Any=None,
         create_pr: bool=False,
         max_shard_size: str='5GB',
     ) -> str:
@@ -759,17 +759,18 @@ class PretrainedModel(Module):
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo: Any,
-        config: Any,
-        module_map: Any=None,
-        local: bool=False,
-        dtype: Any=None,
-        quant: Any=None,
-        subfolder: Any=None,
-        mesh: Any=None,
-        sharding_rules: Any=None,
-        **kwargs: Any
-    ) -> Any:
+        path_or_repo: PathLike,
+        *,
+        config: tp.Any,
+        module_map: tp.List | None = None,
+        local: bool = False,
+        dtype: DType | None = None,
+        quant: tp.Any = None,
+        subfolder: PathLike | str | None = None,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        **kwargs,
+    ) -> tp.Any:
         """
         Loads safetensors weights into a newly instantiated model.
         Supports both single-file (model.safetensors) and sharded models.
@@ -813,8 +814,6 @@ class PretrainedModel(Module):
 
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
-        if isinstance(module_map, dict):
-            module_map = list(module_map.items())
         native_qwix_directory = None
         if local:
             candidate = os.path.join(
@@ -921,11 +920,11 @@ class PretrainedModel(Module):
         default_device = jax.devices()[0]
 
         def parameter_sharding(
-            parameter: Any,
+            parameter: tp.Any,
             axis_names: AxisNames | None=None,
             *,
             use_explicit: bool=True,
-        ) -> Any:
+        ) -> tp.Any:
             sharding = (
                 getattr(parameter, 'sharding', None)
                 if use_explicit
@@ -947,7 +946,7 @@ class PretrainedModel(Module):
                 sharding = default_device
             return sharding
 
-        def place_qarray(value: Any, parameter: Any) -> Any:
+        def place_qarray(value: tp.Any, parameter: tp.Any) -> tp.Any:
             axis_names = getattr(parameter, 'axis_names', None)
             qvalue_sharding = parameter_sharding(parameter, axis_names)
 
@@ -992,7 +991,7 @@ class PretrainedModel(Module):
                 zero_point=zero_point,
             )
 
-        def parameter_quantization_rule(key: Any, parameter: Any) -> tuple[Any, ...]:
+        def parameter_quantization_rule(key: tp.Any, parameter: tp.Any) -> tuple[tp.Any, ...]:
             quantization = getattr(parameter, 'quantization', None)
             quantization_kind = getattr(
                 parameter,
@@ -1006,7 +1005,7 @@ class PretrainedModel(Module):
             )
             return rule, quantization_kind
 
-        def materialize_parameter(key: Any, value: Any, parameter: Any) -> Any:
+        def materialize_parameter(key: tp.Any, value: tp.Any, parameter: tp.Any) -> tp.Any:
             rule, quantization_kind = parameter_quantization_rule(
                 key,
                 parameter,
@@ -1039,7 +1038,7 @@ class PretrainedModel(Module):
                 ),
             )
 
-        def initialize_stacked_parameter(parameter: Any) -> Any:
+        def initialize_stacked_parameter(parameter: tp.Any) -> tp.Any:
             sharding = parameter_sharding(
                 parameter,
                 getattr(parameter, 'axis_names', None),
@@ -1053,7 +1052,7 @@ class PretrainedModel(Module):
                 )()
             return jax.device_put(jnp.zeros(shape, dtype=dtype), sharding)
 
-        def update_stacked_parameter(stacked: Any, layer: Any, layer_index: int) -> Any:
+        def update_stacked_parameter(stacked: tp.Any, layer: tp.Any, layer_index: int) -> tp.Any:
             return jax.lax.dynamic_update_index_in_dim(
                 stacked,
                 layer,

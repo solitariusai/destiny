@@ -590,11 +590,12 @@ class TransformerModel(nn.Module):
                 raise ValueError('kv_cache should contain key and value caches')
 
             key_cache, value_cache = kv_cache
-            if key_cache.shape[0] != self.num_hidden_layers:
+            layer_count = len(self.layers)
+            if key_cache.shape[0] != layer_count:
                 raise ValueError(
                     'key cache should have one entry for each transformer layer'
                 )
-            if value_cache.shape[0] != self.num_hidden_layers:
+            if value_cache.shape[0] != layer_count:
                 raise ValueError(
                     'value cache should have one entry for each transformer layer'
                 )
@@ -916,15 +917,12 @@ class TransformerCausalLM(PretrainedModel):
     def _load_from_pretrained(
         cls,
         path_or_repo: PathLike,
+        *,
         config: ModelConfig,
-        module_map: Mapping[str, str] | Sequence[tuple[str, str]] | None,
+        module_map: tp.List | None,
         **kwargs: tp.Any,
     ) -> tp.Self:
         module_map = module_map or []
-        if isinstance(module_map, dict):
-            module_map = list(module_map.items())
-
-        new_module_map = list(module_map)
         tied = config.tie_word_embeddings or False
         if tied:
             embedding_target = None
@@ -939,14 +937,14 @@ class TransformerCausalLM(PretrainedModel):
                     embedding_target = target
                     break
             if embedding_target is not None:
-                new_module_map.append(
+                module_map.append(
                     ('lm_head.weight', embedding_target)
                 )
 
         return super().from_pretrained(
             path_or_repo,
             config=config,
-            module_map=new_module_map,
+            module_map=module_map,
             **kwargs
         )
 
@@ -954,10 +952,12 @@ class TransformerCausalLM(PretrainedModel):
     def from_pretrained(
         cls,
         path_or_repo: PathLike,
+        *,
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
         local: bool = False,
-        **kwargs: tp.Any,
+        module_map: tp.List | None = None,
+        **kwargs,
     ) -> tp.Self:
         # Load config
         if 'config' in kwargs:
@@ -966,16 +966,17 @@ class TransformerCausalLM(PretrainedModel):
             config = ModelConfig.load_config(path_or_repo, local=local)
 
         # Define how HuggingFace weights map to components using new Tuple format
-        module_map = [
+        module_map = module_map or []
+        module_map.extend([
             ("model.embed_tokens.weight", "model.embed_tokens.embedding"),
-        ]
+        ])
 
         # Call the base class safetensors loader
         # TODO: PretrainedModel.from_pretrained will need to be updated to pass mesh and sharding_rules down
         return cls._load_from_pretrained(
             path_or_repo,
-            config,
-            module_map,
+            config=config, # pyright: ignore
+            module_map=module_map,
             local=local,
             mesh=mesh,
             sharding_rules=sharding_rules,
@@ -1332,12 +1333,10 @@ class TransformerCausalLM(PretrainedModel):
             raise TypeError('seed should be an integer')
         key = jax.random.key(seed)
 
-        num_layers = getattr(self.config, 'num_hidden_layers', None)
+        num_layers = len(self.model.layers)
         num_heads = getattr(self.config, 'num_attention_heads', None)
         num_kv_heads = getattr(self.config, 'num_key_value_heads', None)
         hidden_size = getattr(self.config, 'hidden_size', None)
-        if num_layers is None:
-            raise ValueError('config.num_hidden_layers is required')
         if num_heads is None:
             raise ValueError('config.num_attention_heads is required')
         if num_kv_heads is None:
