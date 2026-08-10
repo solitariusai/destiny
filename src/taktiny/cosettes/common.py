@@ -1148,6 +1148,11 @@ class TransformerCausalLM(PretrainedModel):
                 'ragged attention cannot represent sliding-window decode '
                 'masks; use dot_product, flash, or splash'
             )
+        if decode == 'ragged' and backend not in {'cpu', 'tpu'}:
+            raise ValueError(
+                'ragged attention currently requires a TPU backend; CPU is '
+                'supported only through the reference interpreter'
+            )
         return prefill, decode
 
     @partial(

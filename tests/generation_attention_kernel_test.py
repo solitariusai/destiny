@@ -164,3 +164,8 @@ def test_generation_attention_kernel_auto_uses_dense_decode_off_tpu(
         'flash',
         'dot_product',
     )
+
+    with pytest.raises(ValueError, match='requires a TPU backend'):
+        model._resolve_generation_attention_kernels(
+            {'prefill': 'flash', 'decode': 'ragged'}
+        )
