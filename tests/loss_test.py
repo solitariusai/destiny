@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from taktiny.cosettes._ordinario import TransformerContext
+from taktiny.cosettes.transformers._ordinario import TransformerContext
 from taktiny.trainer.loss import Loss, causal_lm_loss, cross_entropy_loss
 
 

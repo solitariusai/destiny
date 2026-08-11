@@ -20,7 +20,7 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from taktiny.cosettes._ordinario import TransformerContext
+from taktiny.cosettes.transformers._ordinario import TransformerContext
 from taktiny.utils.typing import Array, Batch
 
 from .classification import cross_entropy_loss
