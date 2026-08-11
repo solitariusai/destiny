@@ -14,13 +14,13 @@
 """Position embedding modules"""
 from __future__ import annotations
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 import math
 import jax
 import jax.numpy as jnp
 from taktiny import nn
 from taktiny.nn._continuo import _constrain
-from taktiny.utils.typing import DType, ShardMode
+from taktiny.utils.typing import AxisNames, DType, ShardMode
 
 def rotate_half(x: jax.Array) -> jax.Array:
     """Rotates half the hidden dims of the input."""
@@ -107,22 +107,49 @@ class RotaryEmbedding(nn.Module):
 
         return q_embed, k_embed
 
-class SinusoidalPositionalEmbedding(nn.Module):
-    """Encode scalar or tensor positions as sinusoidal Fourier features."""
+class FrequencyEmbedding(nn.Module):
+    """Encode scalar values with deterministic or Gaussian frequencies.
+
+    ``kind='sinusoidal'`` uses the exponentially spaced frequencies commonly
+    used for timestep and positional embeddings. ``kind='gaussian'`` samples
+    a Fourier basis and stores it as a parameter, which can optionally be
+    trainable. Inputs of any shape receive one trailing embedding dimension.
+
+    Args:
+        embedding_dim: Size of the generated embedding.
+        kind: ``'sinusoidal'`` or ``'gaussian'``.
+        max_period: Largest sinusoidal wavelength.
+        frequency_shift: Sinusoidal frequency denominator adjustment.
+        scale: Multiplier applied to frequencies.
+        flip_sin_to_cos: Emit cosine features before sine features.
+        log_input: Apply a logarithm before frequency projection.
+        trainable: Whether a Gaussian frequency basis is trainable.
+        dtype: Output and Gaussian parameter dtype.
+        rngs: Required when ``kind='gaussian'``.
+        axis_names: Optional logical axis for the Gaussian frequency vector.
+        shard_mode: Automatic or explicit output-sharding behavior.
+    """
 
     def __init__(
         self,
         embedding_dim: int,
         *,
+        kind: Literal['sinusoidal', 'gaussian'] = 'sinusoidal',
         max_period: float = 10_000.0,
         frequency_shift: float = 1.0,
         flip_sin_to_cos: bool = False,
         scale: float = 1.0,
+        log_input: bool = False,
+        trainable: bool = False,
         dtype: DType = jnp.float32,
+        rngs: nn.Rngs | None = None,
+        axis_names: AxisNames | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if not isinstance(embedding_dim, int) or embedding_dim <= 0:
             raise ValueError('embedding_dim must be a positive integer')
+        if kind not in {'sinusoidal', 'gaussian'}:
+            raise ValueError("kind must be 'sinusoidal' or 'gaussian'")
         if not math.isfinite(max_period) or max_period <= 0:
             raise ValueError('max_period must be finite and positive')
         if not math.isfinite(frequency_shift):
@@ -136,36 +163,70 @@ class SinusoidalPositionalEmbedding(nn.Module):
                 'frequency_shift must be smaller than half the embedding '
                 'dimension'
             )
+        if axis_names is not None and len(axis_names) != 1:
+            raise ValueError('axis_names must contain one frequency axis')
+        if kind == 'sinusoidal' and trainable:
+            raise ValueError('only Gaussian frequencies can be trainable')
+        if kind == 'sinusoidal' and axis_names is not None:
+            raise ValueError('axis_names only applies to Gaussian frequencies')
 
         self.embedding_dim = embedding_dim
+        self.kind = kind
         self.max_period = float(max_period)
         self.frequency_shift = float(frequency_shift)
         self.flip_sin_to_cos = flip_sin_to_cos
         self.scale = float(scale)
+        self.log_input = bool(log_input)
         self.dtype = dtype
         self.shard_mode = shard_mode
 
+        if kind == 'gaussian':
+            if rngs is None:
+                raise ValueError(
+                    "rngs is required when kind='gaussian'"
+                )
+            frequencies = jax.random.normal(
+                rngs(),
+                (half_dim,),
+                dtype=dtype,
+            )
+            self.frequencies = nn.Parameter(
+                frequencies,
+                trainable=trainable,
+            )
+            if axis_names is not None:
+                self.frequencies.axis_names = tuple(axis_names)
+
+    def _frequencies(self) -> jax.Array:
+        half_dim = self.embedding_dim // 2
+        if self.kind == 'gaussian':
+            return self.frequencies.value.astype(jnp.float32) * self.scale
+        denominator = (
+            1.0
+            if half_dim <= 1
+            else half_dim - self.frequency_shift
+        )
+        return jnp.exp(
+            -math.log(self.max_period)
+            * jnp.arange(half_dim, dtype=jnp.float32)
+            / denominator
+        ) * self.scale
+
     def __call__(
         self,
-        positions: jax.Array,
+        values: jax.Array,
         out_sharding: jax.sharding.Sharding | None = None,
     ) -> jax.Array:
-        positions = jnp.asarray(positions, dtype=jnp.float32) * self.scale
+        values = jnp.asarray(values, dtype=jnp.float32)
+        if self.log_input:
+            values = jnp.log(values)
         half_dim = self.embedding_dim // 2
         if half_dim == 0:
-            embedding = jnp.empty((*positions.shape, 0), dtype=jnp.float32)
+            embedding = jnp.empty((*values.shape, 0), dtype=jnp.float32)
         else:
-            denominator = (
-                1.0
-                if half_dim == 1
-                else half_dim - self.frequency_shift
-            )
-            frequencies = jnp.exp(
-                -math.log(self.max_period)
-                * jnp.arange(half_dim, dtype=jnp.float32)
-                / denominator
-            )
-            angles = positions[..., None] * frequencies
+            angles = values[..., None] * self._frequencies()
+            if self.kind == 'gaussian':
+                angles = angles * (2.0 * math.pi)
             sin = jnp.sin(angles)
             cos = jnp.cos(angles)
             components = (cos, sin) if self.flip_sin_to_cos else (sin, cos)
@@ -175,7 +236,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
             embedding = jnp.concatenate(
                 [
                     embedding,
-                    jnp.zeros((*positions.shape, 1), dtype=jnp.float32),
+                    jnp.zeros((*values.shape, 1), dtype=jnp.float32),
                 ],
                 axis=-1,
             )
@@ -184,10 +245,40 @@ class SinusoidalPositionalEmbedding(nn.Module):
         return _constrain(embedding, out_sharding, self.shard_mode)
 
     def extra_repr(self) -> str:
+        return f'{self.embedding_dim}, kind={self.kind}'
+
+
+class SinusoidalPositionalEmbedding(FrequencyEmbedding):
+    """Encode scalar or tensor positions as sinusoidal Fourier features."""
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        *,
+        max_period: float = 10_000.0,
+        frequency_shift: float = 1.0,
+        flip_sin_to_cos: bool = False,
+        scale: float = 1.0,
+        dtype: DType = jnp.float32,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
+        super().__init__(
+            embedding_dim,
+            kind='sinusoidal',
+            max_period=max_period,
+            frequency_shift=frequency_shift,
+            flip_sin_to_cos=flip_sin_to_cos,
+            scale=scale,
+            dtype=dtype,
+            shard_mode=shard_mode,
+        )
+
+    def extra_repr(self) -> str:
         return f'{self.embedding_dim}, max_period={self.max_period:g}'
 
 
 __all__ = [
+    'FrequencyEmbedding',
     'rotate_half',
     'RotaryEmbedding',
     'SinusoidalPositionalEmbedding',
