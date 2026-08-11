@@ -16,12 +16,20 @@
 from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple
+import typing as tp
 import jax
 import jax.numpy as jnp
 import math
 
 from taktiny import nn
-from taktiny.utils.typing import AxisNames, DType, ShardMode, Sharding
+from taktiny.nn._continuo import _constrain
+from taktiny.utils.typing import (
+    AxisNames,
+    DType,
+    Initializer,
+    ShardMode,
+    Sharding,
+)
 
 class SegmentIds(NamedTuple):
     """Compact query and key/value segment identifiers."""
@@ -34,6 +42,7 @@ class Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         head_dim: int,
+        *,
         num_kv_heads: int | None = None,
         context_dim: int | None = None,
         pos_emb: nn.Module | None = None,
@@ -42,7 +51,7 @@ class Attention(nn.Module):
         qkv_norm_eps: float = 1e-5,
         dtype: DType | str | None = None,
         window_size: int | None = None,
-        rngs: nn.Rngs | None = None,
+        rngs: nn.Rngs,
         q_axis_names: AxisNames | None = None,
         k_axis_names: AxisNames | None = None,
         v_axis_names: AxisNames | None = None,
@@ -761,21 +770,24 @@ class Attention(nn.Module):
     def __call__(
         self,
         x: jax.Array,
-        context: jax.Array | None = None,
+        context: jax.Array | tp.Tuple[jax.Array, jax.Array] | None = None,
         attention_mask: jax.Array | None = None,
         is_causal: bool = False,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
         position_idx: jax.Array | None = None,
         out_sharding: jax.sharding.Sharding | None = None,
         kernel: str = "dot_product",
+        query: jax.Array | None = None,
+        key: jax.Array | None = None,
+        value: jax.Array | None = None,
     ) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
 
         context_in = context if context is not None else x
 
         # Project directly to [B, L, Heads, HeadDim] thanks to General Linear
-        q = self.q_proj(x)
-        k = self.k_proj(context_in)
-        v = self.v_proj(context_in)
+        q = self.q_proj(x) if query is None else query
+        k = self.k_proj(context_in) if key is None else key
+        v = self.v_proj(context_in) if value is None else value
 
         if self.q_norm is not None:
             q = self.q_norm(q)
@@ -1232,4 +1244,313 @@ class JointAttention(nn.Module):
         )
 
 
-__all__ = ['Attention', 'JointAttention', 'SegmentIds']
+class AttentionPooling(Attention):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        *,
+        num_kv_heads: int | None = None,
+        bias: bool = False,
+        use_qkv_norm: bool = False,
+        qkv_norm_eps: float = 1e-5,
+        dtype: DType | str | None = None,
+        rngs: nn.Rngs,
+        q_axis_names: AxisNames | None = None,
+        k_axis_names: AxisNames | None = None,
+        v_axis_names: AxisNames | None = None,
+        o_axis_names: AxisNames | None = None,
+        q_bias: bool | None = None,
+        k_bias: bool | None = None,
+        v_bias: bool | None = None,
+        o_bias: bool | None = None,
+        scaling: float | None = None,
+        softcap: float | None = None,
+        dropout: float = 0.0,
+        shard_mode: ShardMode = ShardMode.AUTO,
+        quant: tp.Any = None,
+        dot_general: tp.Any = None,
+    ) -> None:
+        super().__init__(
+            hidden_size,
+            num_heads,
+            head_dim,
+            num_kv_heads=num_kv_heads,
+            bias=bias,
+            use_qkv_norm=use_qkv_norm,
+            qkv_norm_eps=qkv_norm_eps,
+            dtype=dtype,
+            rngs=rngs,
+            q_axis_names=q_axis_names,
+            k_axis_names=k_axis_names,
+            v_axis_names=v_axis_names,
+            o_axis_names=o_axis_names,
+            q_bias=q_bias,
+            k_bias=k_bias,
+            v_bias=v_bias,
+            o_bias=o_bias,
+            scaling=scaling,
+            softcap=softcap,
+            dropout=dropout,
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general
+        )
+        self.positional_embedding = nn.Parameter(jax.random.normal(rngs(), (hidden_size,)) * jax.lax.rsqrt(float(hidden_size)))
+
+    def __call__(
+        self,
+        x: jax.Array,
+        *,
+        out_sharding: jax.sharding.Sharding | None = None,
+        kernel: str = "dot_product",
+    ) -> jax.Array:
+        class_token = (
+            x.mean(axis=1, keepdims=True) + self.positional_embedding.astype(x.dtype)
+        )
+        x = jnp.concat([class_token, x], axis=1)
+        out, _ = super().__call__(
+            class_token, x,
+            is_causal=False,
+            out_sharding=out_sharding,
+            kernel=kernel,
+        )
+        return out[:, 0, :]
+
+
+def _resampler_query_initializer(
+    key: jax.Array,
+    shape: tuple[int, ...],
+    dtype: DType,
+) -> jax.Array:
+    return (
+        jax.random.normal(key, shape, dtype=dtype)
+        * jax.lax.rsqrt(float(shape[-1]))
+    )
+
+
+class TokenResampler(nn.Module):
+    """Resample a variable token sequence into learned query tokens.
+
+    Learned queries cross-attend to the input sequence through a supplied
+    :class:`Attention` module. Optional projections, normalizations, and a
+    feed-forward module make the layer suitable for lightweight pooling or
+    Perceiver/IP-Adapter-style token conversion without prescribing a model's
+    surrounding architecture.
+
+    ``attention_mask`` uses ``True`` for valid source tokens and must have
+    shape ``[sequence]`` or ``[batch, sequence]``.
+    """
+
+    def __init__(
+        self,
+        num_queries: int,
+        embedding_dim: int,
+        attention: Attention,
+        *,
+        input_projection: nn.Module | None = None,
+        query_norm: nn.Module | None = None,
+        context_norm: nn.Module | None = None,
+        feed_forward: nn.Module | None = None,
+        output_norm: nn.Module | None = None,
+        output_projection: nn.Module | None = None,
+        include_queries_in_context: bool = False,
+        residual: bool = True,
+        dtype: DType = jnp.float32,
+        rngs: nn.Rngs,
+        initializer: Initializer = _resampler_query_initializer,
+        axis_names: AxisNames | None = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
+        if not isinstance(num_queries, int) or num_queries <= 0:
+            raise ValueError('num_queries must be a positive integer')
+        if not isinstance(embedding_dim, int) or embedding_dim <= 0:
+            raise ValueError('embedding_dim must be a positive integer')
+        if not isinstance(attention, Attention):
+            raise TypeError('attention must be an initialized Attention module')
+        if attention.hidden_size != embedding_dim:
+            raise ValueError(
+                'attention.hidden_size must equal embedding_dim, got '
+                f'{attention.hidden_size} and {embedding_dim}'
+            )
+        components = {
+            'input_projection': input_projection,
+            'query_norm': query_norm,
+            'context_norm': context_norm,
+            'feed_forward': feed_forward,
+            'output_norm': output_norm,
+            'output_projection': output_projection,
+        }
+        for name, component in components.items():
+            if component is not None and not isinstance(component, nn.Module):
+                raise TypeError(
+                    f'{name} must be an initialized nn.Module or None'
+                )
+        if axis_names is not None and len(axis_names) != 2:
+            raise ValueError(
+                'axis_names must contain query and embedding axes'
+            )
+        if (
+            include_queries_in_context
+            and attention.context_dim != embedding_dim
+        ):
+            raise ValueError(
+                'include_queries_in_context requires attention.context_dim '
+                'to equal embedding_dim'
+            )
+
+        self.num_queries = num_queries
+        self.embedding_dim = embedding_dim
+        self.attention = attention
+        self.input_projection = input_projection
+        self.query_norm = query_norm
+        self.context_norm = context_norm
+        self.feed_forward = feed_forward
+        self.output_norm = output_norm
+        self.output_projection = output_projection
+        self.include_queries_in_context = bool(include_queries_in_context)
+        self.residual = bool(residual)
+        self.shard_mode = shard_mode
+        self.queries = nn.Parameter(
+            initializer(
+                rngs(),
+                (num_queries, embedding_dim),
+                dtype,
+            )
+        )
+        if axis_names is not None:
+            self.queries.axis_names = tuple(axis_names)
+
+    @staticmethod
+    def _normalize_mask(
+        mask: jax.Array | None,
+        *,
+        batch_size: int,
+        source_length: int,
+        query_length: int,
+        include_queries: bool,
+    ) -> jax.Array | None:
+        if mask is None:
+            return None
+        mask = jnp.asarray(mask)
+        if mask.dtype != jnp.bool_:
+            raise TypeError('attention_mask must be a boolean array')
+        if mask.shape == (source_length,):
+            mask = jnp.broadcast_to(mask, (batch_size, source_length))
+        elif mask.shape != (batch_size, source_length):
+            raise ValueError(
+                'attention_mask must have shape '
+                f'{(source_length,)} or {(batch_size, source_length)}, got '
+                f'{mask.shape}'
+            )
+        if include_queries:
+            mask = jnp.concatenate(
+                (
+                    mask,
+                    jnp.ones((batch_size, query_length), dtype=jnp.bool_),
+                ),
+                axis=1,
+            )
+        return mask[:, None, None, :]
+
+    def __call__(
+        self,
+        x: jax.Array,
+        attention_mask: jax.Array | None = None,
+        *,
+        out_sharding: jax.sharding.Sharding | None = None,
+        kernel: str = 'dot_product',
+    ) -> jax.Array:
+        x = jnp.asarray(x)
+        if x.ndim not in {2, 3}:
+            raise ValueError(
+                'x must have shape [sequence, embedding] or '
+                '[batch, sequence, embedding]'
+            )
+        if not jnp.issubdtype(x.dtype, jnp.floating):
+            raise TypeError('x must have a floating-point dtype')
+        unbatched = x.ndim == 2
+        if unbatched:
+            x = x[None, ...]
+
+        source_length = x.shape[1]
+        context = (
+            self.input_projection(x)
+            if self.input_projection is not None
+            else x
+        )
+        if context.ndim != 3 or context.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                'input_projection must preserve batch and sequence axes'
+            )
+        if context.shape[-1] != self.attention.context_dim:
+            raise ValueError(
+                'resampler context must end in attention.context_dim='
+                f'{self.attention.context_dim}, got {context.shape[-1]}'
+            )
+
+        queries = jnp.broadcast_to(
+            self.queries.value.astype(context.dtype),
+            (context.shape[0], self.num_queries, self.embedding_dim),
+        )
+        query_input = (
+            self.query_norm(queries)
+            if self.query_norm is not None
+            else queries
+        )
+        context_input = (
+            self.context_norm(context)
+            if self.context_norm is not None
+            else context
+        )
+        if self.include_queries_in_context:
+            context_input = jnp.concatenate(
+                (context_input, query_input),
+                axis=1,
+            )
+
+        mask = self._normalize_mask(
+            attention_mask,
+            batch_size=context.shape[0],
+            source_length=source_length,
+            query_length=self.num_queries,
+            include_queries=self.include_queries_in_context,
+        )
+        attended, _ = self.attention(
+            query_input,
+            context=context_input,
+            attention_mask=mask,
+            out_sharding=None,
+            kernel=kernel,
+        )
+        output = queries + attended if self.residual else attended
+
+        if self.feed_forward is not None:
+            refined = self.feed_forward(output)
+            if self.residual and refined.shape != output.shape:
+                raise ValueError(
+                    'feed_forward must preserve shape when residual=True'
+                )
+            output = output + refined if self.residual else refined
+        if self.output_norm is not None:
+            output = self.output_norm(output)
+        if self.output_projection is not None:
+            output = self.output_projection(output)
+        if unbatched:
+            output = output[0]
+        return _constrain(output, out_sharding, self.shard_mode)
+
+    def extra_repr(self) -> str:
+        return (
+            f'queries={self.num_queries}, embedding_dim={self.embedding_dim}, '
+            f'residual={self.residual}'
+        )
+
+__all__ = [
+    'Attention',
+    'AttentionPooling',
+    'JointAttention',
+    'SegmentIds',
+    'TokenResampler',
+]
