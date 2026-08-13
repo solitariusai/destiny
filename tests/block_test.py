@@ -183,9 +183,30 @@ def test_stack_exposes_vmap_axis_controls_and_broadcast_axes():
     assert jnp.array_equal(output, jnp.asarray([36, 36, 36]))
 
 
-def test_stacks_report_static_configuration_and_leaf_shape_mismatches():
-    with pytest.raises(ValueError, match='static configuration'):
-        nn.SeqStack([ConfiguredAdd(1, 'a'), ConfiguredAdd(2, 'b')])
+def test_seq_stack_groups_contiguous_static_configurations():
+    modules = nn.SeqStack(
+        [
+            ConfiguredAdd(1, 'a'),
+            ConfiguredAdd(2, 'a'),
+            ConfiguredAdd(3, 'b'),
+            ConfiguredAdd(4, 'b'),
+            ConfiguredAdd(5, 'a'),
+            ConfiguredAdd(6, 'a'),
+        ]
+    )
+
+    def apply(layer, carry):
+        output = layer(carry)
+        return output, output
+
+    final, outputs = modules(apply, jnp.asarray(0))
+
+    assert modules.group_sizes == (2, 2, 2)
+    assert final == 21
+    assert jnp.array_equal(outputs, jnp.asarray([1, 3, 6, 10, 15, 21]))
+
+
+def test_parallel_stack_reports_leaf_shape_mismatches():
     with pytest.raises(ValueError, match='same shape'):
         nn.Stack([Add(jnp.ones(2)), Add(jnp.ones(3))])
 

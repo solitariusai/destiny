@@ -105,6 +105,40 @@ def test_sd3_model_forward_is_nhwc_jittable_and_supports_tuple_return():
     assert len(model.layers) == 2
 
 
+def test_sd3_model_scans_compatible_layers_and_falls_back_for_mixed_layers():
+    inputs = _inputs()
+    list_model = SD3TransformerModel(
+        _config(context_pre_only=False),
+        rngs=nn.Rngs(0),
+        use_list=True,
+    )
+    scanned_model = SD3TransformerModel(
+        _config(context_pre_only=False),
+        rngs=nn.Rngs(0),
+        use_list=False,
+    )
+
+    assert list_model.use_list
+    assert not scanned_model.use_list
+    assert isinstance(scanned_model.layers, nn.SeqStack)
+    assert jnp.allclose(list_model(*inputs), scanned_model(*inputs), atol=1e-6)
+
+    mixed_model = SD3TransformerModel(
+        _config(),
+        rngs=nn.Rngs(0),
+        use_list=False,
+    )
+    assert not mixed_model.requested_use_list
+    assert not mixed_model.use_list
+    assert isinstance(mixed_model.layers, nn.SeqStack)
+    assert mixed_model.layers.group_sizes == (1, 1)
+    assert jnp.allclose(
+        SD3TransformerModel(_config(), rngs=nn.Rngs(0))(*inputs),
+        mixed_model(*inputs),
+        atol=1e-6,
+    )
+
+
 def test_sd3_model_controlnet_residual_contract_and_skip_layers():
     model = SD3TransformerModel(_config(), rngs=nn.Rngs(0))
     inputs = _inputs()
@@ -169,3 +203,6 @@ def test_maestro_resolves_sd3_diffusers_class_name():
 
     assert isinstance(model, SD3TransformerModel)
     assert isinstance(model, DiffusionTransformerModel)
+    assert not model.use_list
+    assert isinstance(model.layers, nn.SeqStack)
+    assert model.layers.group_sizes == (1, 1)

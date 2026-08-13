@@ -941,7 +941,10 @@ class DiffusionTransformerModel(PretrainedModel):
     Component types follow role-specific constructor contracts. Initialized
     module instances may be supplied when an architecture requires a different
     constructor. Subclasses can override the preparation and finalization
-    hooks without reimplementing layer iteration.
+    hooks without reimplementing layer iteration. ``use_list=False`` stores
+    layers in an ``nn.SeqStack``. Depth-dependent topologies are partitioned
+    into maximal contiguous stack-compatible groups while preserving one
+    carry and the original execution order.
     """
 
     default_sharding_rules = (
@@ -980,12 +983,15 @@ class DiffusionTransformerModel(PretrainedModel):
         component_kwargs: Mapping[str, Mapping[str, tp.Any]] | None = None,
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
+        use_list: bool = True,
     ) -> None:
         if (
             not isinstance(transformer_layer, type)
             or not issubclass(transformer_layer, nn.Module)
         ):
             raise TypeError('transformer_layer must be an nn.Module subclass')
+        if not isinstance(use_list, bool):
+            raise TypeError('use_list must be a boolean')
 
         self.config = config
         self.num_layers = _positive_int(
@@ -1088,12 +1094,19 @@ class DiffusionTransformerModel(PretrainedModel):
                 },
             )
 
-        self.layers = nn.List(
-            [
-                transformer_layer(config, rngs=rngs, layer_idx=index)
-                for index in range(self.num_layers)
-            ]
-        )
+        layers = [
+            transformer_layer(config, rngs=rngs, layer_idx=index)
+            for index in range(self.num_layers)
+        ]
+        self.requested_use_list = use_list
+        if use_list:
+            self.layers = nn.List(layers)
+        else:
+            for layer in layers:
+                if hasattr(layer, 'layer_idx'):
+                    layer.layer_idx = None
+            self.layers = nn.SeqStack(layers)
+        self.use_list = isinstance(self.layers, nn.List)
 
         if output_norm is None:
             self.output_norm = None
@@ -1276,7 +1289,89 @@ class DiffusionTransformerModel(PretrainedModel):
 
         call_layer = self._call_transformer_layer
         if self.remat:
-            call_layer = jax.checkpoint(call_layer, prevent_cse=True)
+            call_layer = jax.checkpoint(
+                call_layer,
+                prevent_cse=self.use_list,
+            )
+
+        if not self.use_list:
+            control_stack = None
+            if controls:
+                for control in controls:
+                    if control.shape != hidden_states.shape:
+                        raise ValueError(
+                            'each control residual must match the hidden token '
+                            f'shape {hidden_states.shape}; got {control.shape}'
+                        )
+                control_stack = jnp.stack(
+                    tuple(jnp.asarray(control) for control in controls)
+                )
+
+            skipped_indices = None
+            if skipped:
+                skipped_indices = jnp.asarray(
+                    tuple(sorted(skipped)),
+                    dtype=jnp.int32,
+                )
+
+            def apply_layer(
+                layer: nn.Module,
+                carry: tuple[jax.Array, jax.Array, jax.Array],
+            ) -> tuple[
+                tuple[jax.Array, jax.Array, jax.Array],
+                None,
+            ]:
+                context, hidden, layer_index = carry
+
+                def apply(
+                    operands: tuple[jax.Array, jax.Array],
+                ) -> tuple[jax.Array, jax.Array]:
+                    current_context, current_hidden = operands
+                    return call_layer(
+                        layer,
+                        current_hidden,
+                        current_context,
+                        conditioning,
+                        **layer_kwargs,
+                    )
+
+                if skipped_indices is None:
+                    context, hidden = apply((context, hidden))
+                else:
+                    should_skip = jnp.any(layer_index == skipped_indices)
+                    context, hidden = jax.lax.cond(
+                        should_skip,
+                        lambda operands: operands,
+                        apply,
+                        (context, hidden),
+                    )
+
+                if (
+                    control_stack is not None
+                    and not getattr(layer, 'context_pre_only', False)
+                ):
+                    control_index = jnp.minimum(
+                        layer_index * len(controls) // self.num_layers,
+                        len(controls) - 1,
+                    )
+                    hidden = hidden + jax.lax.dynamic_index_in_dim(
+                        control_stack,
+                        control_index,
+                        axis=0,
+                        keepdims=False,
+                    )
+
+                return (context, hidden, layer_index + 1), None
+
+            (encoder_hidden_states, hidden_states, _), _ = self.layers(
+                apply_layer,
+                (
+                    encoder_hidden_states,
+                    hidden_states,
+                    jnp.asarray(0, dtype=jnp.int32),
+                ),
+            )
+            return encoder_hidden_states, hidden_states
 
         for index, layer in enumerate(self.layers):
             if index not in skipped:

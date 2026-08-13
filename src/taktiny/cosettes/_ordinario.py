@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import inspect
 import typing as tp
 
 from taktiny import nn
@@ -121,6 +122,17 @@ class DiffusionDenoiser(nn.Module):
         self.component_names = tuple(modules)
         return self
 
+    @staticmethod
+    def _accepts_init_keyword(
+        module_type: type[nn.Module],
+        keyword: str,
+    ) -> bool:
+        parameters = inspect.signature(module_type.__init__).parameters
+        return keyword in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
     @classmethod
     def from_pretrained(
         cls,
@@ -166,6 +178,11 @@ class DiffusionDenoiser(nn.Module):
                 continue
 
             options = dict(load_kwargs)
+            if (
+                'use_list' in options
+                and not cls._accepts_init_keyword(module_type, 'use_list')
+            ):
+                options.pop('use_list')
             per_component = options_by_name.get(name, {})
             if not isinstance(per_component, Mapping):
                 raise TypeError(

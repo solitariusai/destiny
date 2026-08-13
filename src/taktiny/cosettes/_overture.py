@@ -35,6 +35,88 @@ from taktiny.nn.module import iter_children
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 
 
+def _grouped_stack_layout(
+    state: tp.Mapping[str, tp.Any],
+) -> dict[tuple[str, ...], tuple[int, ...]]:
+    sizes: dict[tuple[str, ...], dict[int, int]] = {}
+    for name, value in state.items():
+        parts = name.split('.')
+        for position in range(len(parts) - 2):
+            if (
+                parts[position] != 'groups'
+                or not parts[position + 1].isdigit()
+                or parts[position + 2] != 'stacked'
+            ):
+                continue
+            shape = getattr(value, 'shape', ())
+            if not shape:
+                raise ValueError(
+                    f'Grouped stacked parameter {name!r} has no layer axis'
+                )
+            root = tuple(parts[:position])
+            group_index = int(parts[position + 1])
+            group_sizes = sizes.setdefault(root, {})
+            previous = group_sizes.setdefault(group_index, shape[0])
+            if previous != shape[0]:
+                raise ValueError(
+                    f'Grouped stack {".".join(root)!r} has inconsistent '
+                    f'size for group {group_index}'
+                )
+            break
+
+    layouts = {}
+    for root, indexed_sizes in sizes.items():
+        indices = sorted(indexed_sizes)
+        if indices != list(range(len(indices))):
+            raise ValueError(
+                f'Grouped stack {".".join(root)!r} has non-contiguous groups'
+            )
+        layouts[root] = tuple(indexed_sizes[index] for index in indices)
+    return layouts
+
+
+def _resolve_stacked_parameter(
+    name: str,
+    parameters: tp.Mapping[str, tp.Any],
+    grouped_layouts: tp.Mapping[tuple[str, ...], tuple[int, ...]],
+) -> tuple[str, int] | None:
+    parts = name.split('.')
+    for position, part in enumerate(parts):
+        if not part.isdigit():
+            continue
+        layer_index = int(part)
+
+        stacked_parts = list(parts)
+        stacked_parts[position] = 'stacked'
+        stacked_name = '.'.join(stacked_parts)
+        if stacked_name in parameters:
+            if layer_index < parameters[stacked_name].shape[0]:
+                return stacked_name, layer_index
+            continue
+
+        root = tuple(parts[:position])
+        group_sizes = grouped_layouts.get(root)
+        if group_sizes is None:
+            continue
+        offset = 0
+        for group_index, group_size in enumerate(group_sizes):
+            if layer_index < offset + group_size:
+                local_index = layer_index - offset
+                grouped_parts = [
+                    *root,
+                    'groups',
+                    str(group_index),
+                    'stacked',
+                    *parts[position + 1:],
+                ]
+                grouped_name = '.'.join(grouped_parts)
+                if grouped_name in parameters:
+                    return grouped_name, local_index
+                break
+            offset += group_size
+    return None
+
+
 class PretrainedModel(nn.Module):
     """
     Base class for models that load and save pretrained checkpoints.
@@ -334,6 +416,7 @@ class PretrainedModel(nn.Module):
     def _expand_stacked_state_dict(state: tp.Any) -> tp.Any:
         layout = []
         stacked_groups = {}
+        grouped_layouts = _grouped_stack_layout(state)
 
         for name, value in state.items():
             parts = name.split('.')
@@ -377,7 +460,24 @@ class PretrainedModel(nn.Module):
             for layer_index in range(num_layers):
                 for parts, value in group:
                     layer_parts = list(parts)
-                    layer_parts[stacked_index] = str(layer_index)
+                    if (
+                        stacked_index >= 2
+                        and parts[stacked_index - 2] == 'groups'
+                        and parts[stacked_index - 1].isdigit()
+                    ):
+                        root = tuple(parts[:stacked_index - 2])
+                        group_index = int(parts[stacked_index - 1])
+                        group_sizes = grouped_layouts[root]
+                        global_index = (
+                            sum(group_sizes[:group_index]) + layer_index
+                        )
+                        layer_parts = [
+                            *parts[:stacked_index - 2],
+                            str(global_index),
+                            *parts[stacked_index + 1:],
+                        ]
+                    else:
+                        layer_parts[stacked_index] = str(layer_index)
                     expanded['.'.join(layer_parts)] = value[layer_index]
 
         return expanded
@@ -508,6 +608,7 @@ class PretrainedModel(nn.Module):
             filenames = {'model.safetensors': None}
 
         parameters = self.flat_parameter_dict()
+        grouped_layouts = _grouped_stack_layout(parameters)
         checkpoint_state = {}
         loaded = {}
         stacked_parameters = {}
@@ -547,23 +648,14 @@ class PretrainedModel(nn.Module):
                 continue
 
             matched_stack = False
-            parts = name.split('.')
-            for position, part in enumerate(parts):
-                if not part.isdigit():
-                    continue
-                stacked_parts = list(parts)
-                stacked_parts[position] = 'stacked'
-                stacked_name = '.'.join(stacked_parts)
-                if stacked_name not in parameters:
-                    continue
-
+            resolved = _resolve_stacked_parameter(
+                name,
+                parameters,
+                grouped_layouts,
+            )
+            if resolved is not None:
+                stacked_name, layer_index = resolved
                 parameter = parameters[stacked_name]
-                layer_index = int(part)
-                if layer_index >= parameter.shape[0]:
-                    raise ValueError(
-                        f'Model layer index {layer_index} is out of '
-                        f'range for {stacked_name!r}'
-                    )
                 expected_shape = parameter.shape[1:]
                 if value.shape != expected_shape:
                     raise ValueError(
@@ -581,7 +673,6 @@ class PretrainedModel(nn.Module):
                 entry['values'][layer_index] = value
                 entry['indices'].add(layer_index)
                 matched_stack = True
-                break
 
             if not matched_stack:
                 unexpected.append(name)
@@ -923,6 +1014,7 @@ class PretrainedModel(nn.Module):
             return state
 
         current_state_dict = state.flat_parameter_dict()
+        grouped_layouts = _grouped_stack_layout(current_state_dict)
         new_state = {}
         not_found_some = False
 
@@ -1144,11 +1236,13 @@ class PretrainedModel(nn.Module):
 
                     else:
                         # Check if it belongs to a SeqStack
-                        match = re.search(r'\.(\d+)\.', k_mapped)
-                        if match:
-                            idx = int(match.group(1))
-                            k_stacked = k_mapped[:match.start()] + '.stacked.' + k_mapped[match.end():]
-
+                        resolved = _resolve_stacked_parameter(
+                            k_mapped,
+                            current_state_dict,
+                            grouped_layouts,
+                        )
+                        if resolved is not None:
+                            k_stacked, idx = resolved
                             if k_stacked in current_state_dict:
                                 target_var = current_state_dict[k_stacked]
 

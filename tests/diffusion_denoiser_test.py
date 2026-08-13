@@ -47,6 +47,16 @@ class _LoadableComponent(nn.Module):
 class _Transformer(_LoadableComponent):
     calls: ClassVar[list[dict[str, Any]]] = []
 
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        marker: str = '',
+        use_list: bool = True,
+    ) -> None:
+        super().__init__(config, marker=marker)
+        self.use_list = use_list
+
 
 class _Autoencoder(_LoadableComponent):
     calls: ClassVar[list[dict[str, Any]]] = []
@@ -89,6 +99,24 @@ def test_diffusion_denoiser_loads_each_component_from_its_subfolder(tmp_path):
     assert _Transformer.calls[0]['marker'] == 'shared'
     assert _Autoencoder.calls[0]['subfolder'] == 'autoencoder'
     assert _Autoencoder.calls[0]['marker'] == 'vae-only'
+
+
+def test_diffusion_denoiser_routes_use_list_only_to_compatible_components(
+    tmp_path,
+):
+    _Transformer.calls.clear()
+    _Autoencoder.calls.clear()
+    _write_config(tmp_path, 'transformer', 'transformer')
+    _write_config(tmp_path, 'autoencoder', 'vae')
+
+    _ArrayDenoiser.from_pretrained(
+        tmp_path,
+        local=True,
+        use_list=False,
+    )
+
+    assert _Transformer.calls[0]['kwargs']['use_list'] is False
+    assert 'use_list' not in _Autoencoder.calls[0]['kwargs']
 
 
 def test_diffusion_denoiser_accepts_preloaded_components(tmp_path):

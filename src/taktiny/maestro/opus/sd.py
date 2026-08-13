@@ -87,7 +87,6 @@ class SD3TransformerModel(DiffusionTransformerModel):
     """Checkpoint-loadable Stable Diffusion 3 MMDiT backbone."""
 
     def __init__(self, config: ModelConfig, **kwargs: tp.Any) -> None:
-        kwargs.pop('use_list', None)
         component_kwargs = {
             name: dict(values)
             for name, values in dict(
