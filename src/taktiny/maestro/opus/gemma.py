@@ -22,8 +22,6 @@ from taktiny.maestro._livret import repertoire
 from taktiny.cosettes.transformers._ordinario import (
     TransformerCausalLM,
     TransformerConditionalGeneration,
-    DiffusionLM,
-    TransformerConditionalGeneration,
     TransformerContext
 )
 from taktiny.cosettes.transformers.gemma import (
@@ -221,7 +219,7 @@ class Gemma4Unified(TransformerConditionalGeneration):
             **kwargs,
         )
 
-class DiffusionGemma(DiffusionLM):
+class DiffusionGemma(nn.Module):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 

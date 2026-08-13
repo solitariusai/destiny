@@ -105,16 +105,25 @@ class Maestro:
         repo_or_path: PathLike,
         config: ModelConfig | tp.Dict | None,
         config_filename: str,
-        local: bool
+        local: bool,
+        subfolder: str | None = None,
     ):
         if isinstance(config, dict):
             config = ModelConfig(**config)
         if config is None:
-            config = ModelConfig.load_config(repo_or_path, config_filename, local=local)
+            config = ModelConfig.load_config(
+                repo_or_path,
+                config_filename,
+                subfolder=subfolder,
+                local=local,
+            )
         if config is None:
             raise ValueError(f'Unable to load config from {repo_or_path}')
 
         architectures = getattr(config, 'architectures', None) or []
+        if not architectures:
+            class_name = getattr(config, '_class_name', None)
+            architectures = [class_name] if class_name else []
         if len(architectures) != 1:
             raise ValueError(
                 'Expected config.architectures to contain exactly one architecture'
@@ -177,9 +186,16 @@ class Maestro:
             NotImplementedError: If the declared architecture is not
                 registered.
         """
-        config_filename = kwargs.get('config_filename', 'config.json')
-        config = kwargs.get('config', None)
-        model_cls, config = Maestro._get_architecture_class(repo_or_path, config, config_filename, local)
+        kwargs = dict(kwargs)
+        config_filename = kwargs.pop('config_filename', 'config.json')
+        config = kwargs.pop('config', None)
+        model_cls, config = Maestro._get_architecture_class(
+            repo_or_path,
+            config,
+            config_filename,
+            local,
+            kwargs.get('subfolder'),
+        )
 
         # Parse Mesh if provided as a dict (e.g. {'data': 4, 'model': 2})
         if isinstance(mesh, dict):
@@ -245,9 +261,16 @@ class Maestro:
             NotImplementedError: If the declared architecture is not
                 registered.
         """
-        config_filename = kwargs.get('config_filename', 'config.json')
-        config = kwargs.get('config', None)
-        model_cls, config = Maestro._get_architecture_class(repo_or_path, config, config_filename, local)
+        kwargs = dict(kwargs)
+        config_filename = kwargs.pop('config_filename', 'config.json')
+        config = kwargs.pop('config', None)
+        model_cls, config = Maestro._get_architecture_class(
+            repo_or_path,
+            config,
+            config_filename,
+            local,
+            kwargs.get('subfolder'),
+        )
 
         if isinstance(mesh, dict):
             axis_names = tuple(mesh)

@@ -24,6 +24,7 @@ import jax.numpy as jnp
 from jax.nn.initializers import zeros
 
 from taktiny import nn
+from taktiny.layers.positional_embedding import FrequencyEmbedding
 from taktiny.nn._continuo import (
     _canonical_axis,
     _constrain,
@@ -39,7 +40,6 @@ from taktiny.utils.typing import (
     Initializer,
     ShardMode,
 )
-
 
 _PositionEmbedding = (
     ArrayLike | Callable[[tuple[int, ...]], ArrayLike] | None
@@ -463,8 +463,133 @@ class PatchEmbedding(nn.Module):
         )
 
 
+class CombinedTimestepTextProjEmbedding(ConditionEmbedding):
+    """Combine projected timestep and pooled-text conditioning.
+
+    Args:
+        embedding_dim: Size of the shared output embedding.
+        pooled_projection_dim: Size of the pooled-text input.
+        frequency_dim: Size of the sinusoidal timestep embedding.
+        frequency_shift: Timestep frequency denominator adjustment.
+        flip_sin_to_cos: Emit cosine timestep features before sine features.
+        timestep_scale: Multiplier applied to timestep frequencies.
+        activation: Activation used by both projection branches.
+        bias: Whether the learned projections include biases.
+        dtype: Projection parameter and frequency output dtype.
+        rngs: Random stream used to initialize the projections.
+        quant: Optional quantization rule forwarded to linear projections.
+        dot_general: Optional matrix multiplication implementation.
+        shard_mode: Automatic or explicit output-sharding behavior.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        pooled_projection_dim: int,
+        frequency_dim: int = 256,
+        frequency_shift: float = 0.0,
+        flip_sin_to_cos: bool = True,
+        timestep_scale: float = 1.0,
+        activation: Activation = 'silu',
+        dtype: DType = jnp.float32,
+        *,
+        bias: bool = True,
+        rngs: nn.Rngs,
+        quant: Any = None,
+        dot_general: Any = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
+        for name, value in (
+            ('embedding_dim', embedding_dim),
+            ('pooled_projection_dim', pooled_projection_dim),
+            ('frequency_dim', frequency_dim),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f'{name} must be a positive integer')
+
+        linear_options = {
+            'bias': bias,
+            'dtype': dtype,
+            'rngs': rngs,
+            'quant': quant,
+            'dot_general': dot_general,
+            'shard_mode': shard_mode,
+        }
+        timestep_embedding = ProjectionEmbedding(
+            nn.Linear(
+                frequency_dim,
+                embedding_dim,
+                axis_names=('frequency', 'conditioning'),
+                **linear_options,
+            ),
+            activation=activation,
+            output_projection=nn.Linear(
+                embedding_dim,
+                embedding_dim,
+                axis_names=('conditioning', 'embed'),
+                **linear_options,
+            ),
+            shard_mode=shard_mode,
+        )
+        text_embedding = ProjectionEmbedding(
+            nn.Linear(
+                pooled_projection_dim,
+                embedding_dim,
+                axis_names=('pooled_projection', 'conditioning'),
+                **linear_options,
+            ),
+            activation=activation,
+            output_projection=nn.Linear(
+                embedding_dim,
+                embedding_dim,
+                axis_names=('conditioning', 'embed'),
+                **linear_options,
+            ),
+            shard_mode=shard_mode,
+        )
+        super().__init__(
+            {
+                'timestep': nn.Sequential(
+                    [
+                        FrequencyEmbedding(
+                            frequency_dim,
+                            frequency_shift=frequency_shift,
+                            flip_sin_to_cos=flip_sin_to_cos,
+                            scale=timestep_scale,
+                            dtype=dtype,
+                            shard_mode=shard_mode,
+                        ),
+                        timestep_embedding,
+                    ]
+                ),
+                'pooled_projection': text_embedding,
+            },
+            fusion='sum',
+            shard_mode=shard_mode,
+        )
+
+        self.embedding_dim = embedding_dim
+        self.pooled_projection_dim = pooled_projection_dim
+        self.frequency_dim = frequency_dim
+
+    def __call__(
+        self,
+        timestep: jax.Array,
+        pooled_projection: jax.Array,
+        *,
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> jax.Array:
+        return super().__call__(
+            timestep=timestep,
+            pooled_projection=pooled_projection,
+            out_sharding=out_sharding,
+        )
+
+
+
 __all__ = [
     'ConditionEmbedding',
     'PatchEmbedding',
     'ProjectionEmbedding',
+    'CombinedTimestepTextProjEmbedding',
 ]

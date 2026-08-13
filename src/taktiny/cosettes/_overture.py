@@ -30,12 +30,12 @@ from huggingface_hub import (
 )
 from safetensors.flax import save_file
 
-from taktiny.nn import Module, Rngs
+from taktiny import nn
 from taktiny.nn.module import iter_children
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 
 
-class PretrainedModel(Module):
+class PretrainedModel(nn.Module):
     """
     Base class for models that load and save pretrained checkpoints.
 
@@ -222,7 +222,7 @@ class PretrainedModel(Module):
                 if isinstance(child, LoRALinear):
                     state[f'{full_name}.lora_A'] = child.lora_A.value
                     state[f'{full_name}.lora_B'] = child.lora_B.value
-                elif isinstance(child, Module):
+                elif isinstance(child, nn.Module):
                     collect(child, full_name)
 
         collect(self)
@@ -767,13 +767,15 @@ class PretrainedModel(Module):
         dtype: DType | None = None,
         quant: tp.Any = None,
         subfolder: PathLike | str | None = None,
+        weights_filename: str = 'model.safetensors',
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
         **kwargs,
     ) -> tp.Any:
         """
-        Loads safetensors weights into a newly instantiated model.
-        Supports both single-file (model.safetensors) and sharded models.
+        Loads Safetensors weights into a newly instantiated model. Supports
+        both single-file and sharded checkpoints, including architecture-
+        specific filenames selected through ``weights_filename``.
         """
         uniform_quant = None
         if dtype is not None:
@@ -812,6 +814,12 @@ class PretrainedModel(Module):
         elif uniform_quant is not None:
             setattr(config, 'quant', uniform_quant)
 
+        if not isinstance(weights_filename, str) or not weights_filename:
+            raise ValueError('weights_filename must be a non-empty string')
+        if not weights_filename.endswith('.safetensors'):
+            raise ValueError('weights_filename must end with .safetensors')
+        index_filename = f'{weights_filename}.index.json'
+
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
         native_qwix_directory = None
@@ -827,7 +835,11 @@ class PretrainedModel(Module):
         # 1. Determine if model is sharded or single file
         is_sharded = False
         if local:
-            index_path = os.path.join(path_or_repo_str, subfolder if subfolder else "", "model.safetensors.index.json")
+            index_path = os.path.join(
+                path_or_repo_str,
+                subfolder if subfolder else '',
+                index_filename,
+            )
             if os.path.exists(index_path):
                 is_sharded = True
         else:
@@ -835,10 +847,18 @@ class PretrainedModel(Module):
             try:
                 info = repo_info(repo_id=path_or_repo_str)
                 files = [f.rfilename for f in info.siblings]
-                target_index = f"{subfolder}/model.safetensors.index.json" if subfolder else "model.safetensors.index.json"
+                target_index = (
+                    f'{subfolder}/{index_filename}'
+                    if subfolder
+                    else index_filename
+                )
                 if target_index in files:
                     is_sharded = True
-                    index_path = hf_hub_download(repo_id=path_or_repo_str, subfolder=subfolder, filename="model.safetensors.index.json")
+                    index_path = hf_hub_download(
+                        repo_id=path_or_repo_str,
+                        subfolder=subfolder,
+                        filename=index_filename,
+                    )
                 target_quantization = (
                     f'{subfolder}/quantization_config.json'
                     if subfolder
@@ -868,7 +888,7 @@ class PretrainedModel(Module):
                     files_to_load[file_name] = []
                 files_to_load[file_name].append(k_str)
         else:
-            files_to_load["model.safetensors"] = None
+            files_to_load[weights_filename] = None
 
         # 3. Resolve every checkpoint file before materializing any parameters.
         resolved_files = {}
@@ -887,7 +907,7 @@ class PretrainedModel(Module):
                 )
 
         # 4. Instantiate model skeleton using eval_shape (no memory allocation)
-        rngs = kwargs.pop('rngs', Rngs(0))
+        rngs = kwargs.pop('rngs', nn.Rngs(0))
         state = jax.eval_shape(
             lambda: cls(
                 config,
@@ -1098,6 +1118,22 @@ class PretrainedModel(Module):
                         if value.ndim == 2:
                             if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                 value = value.T
+                        elif (
+                            value.ndim >= 3
+                            and k_mapped.endswith('.weight')
+                            and value.shape != target_var.shape
+                        ):
+                            convolution_shape = (
+                                *value.shape[2:],
+                                value.shape[1],
+                                value.shape[0],
+                            )
+                            if convolution_shape == target_var.shape:
+                                value = value.transpose(
+                                    *range(2, value.ndim),
+                                    1,
+                                    0,
+                                )
                         if value.shape != target_var.shape:
                             value = value.reshape(target_var.shape)
                         new_state[k_mapped] = materialize_parameter(
@@ -1120,6 +1156,22 @@ class PretrainedModel(Module):
                                 if value.ndim == 2:
                                     if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                         value = value.T
+                                elif (
+                                    value.ndim >= 3
+                                    and k_mapped.endswith('.weight')
+                                    and value.shape != layer_shape
+                                ):
+                                    convolution_shape = (
+                                        *value.shape[2:],
+                                        value.shape[1],
+                                        value.shape[0],
+                                    )
+                                    if convolution_shape == layer_shape:
+                                        value = value.transpose(
+                                            *range(2, value.ndim),
+                                            1,
+                                            0,
+                                        )
                                 if value.shape != layer_shape:
                                     value = value.reshape(layer_shape)
 
@@ -1290,4 +1342,6 @@ class PretrainedModel(Module):
         state.base_model_name_or_path = path_or_repo_str
         return state
 
-__all__ = ['PretrainedModel']
+__all__ = [
+    'PretrainedModel',
+]

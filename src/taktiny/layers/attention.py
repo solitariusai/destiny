@@ -36,6 +36,44 @@ class SegmentIds(NamedTuple):
     q: jax.Array
     kv: jax.Array
 
+
+class _AcrossHeadsRMSNorm(nn.Module):
+    """RMS-normalize the combined heads and head-width dimensions."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_dim: int,
+        *,
+        eps: float,
+        dtype: DType | str | None,
+    ) -> None:
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.eps = eps
+        self.weight = nn.Parameter(
+            jnp.ones((num_heads * head_dim,), dtype=dtype)
+        )
+        self.weight.axis_names = ('attention_embed',)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        if x.shape[-2:] != (self.num_heads, self.head_dim):
+            raise ValueError(
+                'across-head RMSNorm expected trailing shape '
+                f'{(self.num_heads, self.head_dim)}, got {x.shape[-2:]}'
+            )
+        input_dtype = x.dtype
+        value = x.astype(jnp.float32)
+        variance = jnp.mean(
+            jnp.square(value),
+            axis=(-2, -1),
+            keepdims=True,
+        )
+        value = value * jax.lax.rsqrt(variance + self.eps)
+        weight = self.weight.value.reshape(self.num_heads, self.head_dim)
+        return (value * weight.astype(value.dtype)).astype(input_dtype)
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -48,6 +86,7 @@ class Attention(nn.Module):
         pos_emb: nn.Module | None = None,
         bias: bool = False,
         use_qkv_norm: bool = False,
+        qkv_norm_across_heads: bool = False,
         qkv_norm_eps: float = 1e-5,
         dtype: DType | str | None = None,
         window_size: int | None = None,
@@ -78,6 +117,7 @@ class Attention(nn.Module):
             )
         self.context_dim = hidden_size if context_dim is None else context_dim
         self.use_qkv_norm = use_qkv_norm
+        self.qkv_norm_across_heads = qkv_norm_across_heads
         self.qkv_norm_eps = qkv_norm_eps
         self.window_size = window_size
         self.scaling = scaling
@@ -124,21 +164,39 @@ class Attention(nn.Module):
         self.q_norm = self.k_norm = None
 
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_q_norm', False):
-            self.q_norm = nn.RMSNorm(
-                self.head_dim,
-                eps=self.qkv_norm_eps,
-                dtype=dtype,
-                axis_names=('head_dim',),
-                shard_mode=shard_mode,
+            self.q_norm = (
+                _AcrossHeadsRMSNorm(
+                    self.num_heads,
+                    self.head_dim,
+                    eps=self.qkv_norm_eps,
+                    dtype=dtype,
+                )
+                if self.qkv_norm_across_heads
+                else nn.RMSNorm(
+                    self.head_dim,
+                    eps=self.qkv_norm_eps,
+                    dtype=dtype,
+                    axis_names=('head_dim',),
+                    shard_mode=shard_mode,
+                )
             )
 
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_k_norm', False):
-            self.k_norm = nn.RMSNorm(
-                self.head_dim,
-                eps=self.qkv_norm_eps,
-                dtype=dtype,
-                axis_names=('head_dim',),
-                shard_mode=shard_mode,
+            self.k_norm = (
+                _AcrossHeadsRMSNorm(
+                    self.num_kv_heads,
+                    self.head_dim,
+                    eps=self.qkv_norm_eps,
+                    dtype=dtype,
+                )
+                if self.qkv_norm_across_heads
+                else nn.RMSNorm(
+                    self.head_dim,
+                    eps=self.qkv_norm_eps,
+                    dtype=dtype,
+                    axis_names=('head_dim',),
+                    shard_mode=shard_mode,
+                )
             )
 
     def _scale_query(
@@ -1035,6 +1093,7 @@ class JointAttention(nn.Module):
         v_bias: bool | None = None,
         o_bias: bool | None = None,
         scaling: float | None = None,
+        context_first: bool = False,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -1058,6 +1117,9 @@ class JointAttention(nn.Module):
         self.use_qkv_norm = use_qkv_norm
         self.qkv_norm_eps = qkv_norm_eps
         self.scaling = scaling
+        if not isinstance(context_first, bool):
+            raise TypeError('context_first must be a boolean')
+        self.context_first = context_first
 
         def projection_bias(override: bool | None) -> bool:
             return bias if override is None else override
@@ -1199,9 +1261,14 @@ class JointAttention(nn.Module):
             q1, k1 = self.q_norm_1(q1), self.k_norm_1(k1)
             q2, k2 = self.q_norm_2(q2), self.k_norm_2(k2)
 
-        q = jnp.concatenate((q1, q2), axis=1)
-        k = jnp.concatenate((k1, k2), axis=1)
-        v = jnp.concatenate((v1, v2), axis=1)
+        if self.context_first:
+            q = jnp.concatenate((q2, q1), axis=1)
+            k = jnp.concatenate((k2, k1), axis=1)
+            v = jnp.concatenate((v2, v1), axis=1)
+        else:
+            q = jnp.concatenate((q1, q2), axis=1)
+            k = jnp.concatenate((k1, k2), axis=1)
+            v = jnp.concatenate((v1, v2), axis=1)
 
         segment_ids = Attention._segments_from_positions(
             position_idx,
@@ -1224,7 +1291,10 @@ class JointAttention(nn.Module):
             segment_ids=segment_ids,
             **kernel_kwargs,
         )
-        out1, out2 = jnp.split(out, (length1,), axis=1)
+        if self.context_first:
+            out2, out1 = jnp.split(out, (x2.shape[1],), axis=1)
+        else:
+            out1, out2 = jnp.split(out, (length1,), axis=1)
 
         if out_shardings is None:
             out_sharding1 = out_sharding2 = None
@@ -1240,7 +1310,8 @@ class JointAttention(nn.Module):
     def extra_repr(self) -> str:
         return (
             f'{self.hidden_size1} + {self.hidden_size2}, '
-            f'heads={self.num_heads}, head_dim={self.head_dim}'
+            f'heads={self.num_heads}, head_dim={self.head_dim}, '
+            f'context_first={self.context_first}'
         )
 
 
