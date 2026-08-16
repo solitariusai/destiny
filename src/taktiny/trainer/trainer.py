@@ -1792,6 +1792,20 @@ class Trainer:
             ),
             None,
         )
+        loss_window = deque(
+            maxlen=self.training_config.log_interval,
+        )
+
+        def moving_average_loss() -> float | None:
+            finite_losses = [
+                value
+                for value in loss_window
+                if value is not None and math.isfinite(value)
+            ]
+            if not finite_losses:
+                return None
+            return sum(finite_losses) / len(finite_losses)
+
         grad_norm = None
         update_skipped = False
         start_epoch = resume_state['epoch'] if resume_state else 0
@@ -1966,6 +1980,8 @@ class Trainer:
                 )
                 self.last_update_skipped = update_skipped
                 loss = loss_value if math.isfinite(loss_value) else None
+                loss_window.append(loss)
+                smoothed_loss = moving_average_loss()
                 grad_norm = self.last_grad_norm
                 steps_run_this_call += 1
                 steps_since_log += 1
@@ -1994,7 +2010,11 @@ class Trainer:
                 progress.update(
                     task_id,
                     advance=1,
-                    loss=loss_value,
+                    loss=(
+                        smoothed_loss
+                        if smoothed_loss is not None
+                        else float('nan')
+                    ),
                 )
 
                 accumulated_grads = None
@@ -2009,13 +2029,14 @@ class Trainer:
                     )
                     record = {
                         **step_logs,
+                        'loss': smoothed_loss,
                         'seconds_per_step': seconds_per_step,
                     }
                     self.log_history.append(record)
                     self._call_event('on_log', logs=dict(record))
                     loss_text = (
-                        f'{loss:<7.4f}'
-                        if loss is not None
+                        f'{smoothed_loss:<7.4f}'
+                        if smoothed_loss is not None
                         else 'non-finite'
                     )
                     learning_rate_text = (
@@ -2263,10 +2284,11 @@ class Trainer:
                     / max(1, steps_since_log)
                 )
                 learning_rate = self._learning_rate_at_step(step)
+                smoothed_loss = moving_average_loss()
                 self.log_history.append({
                     'step': step,
                     'epoch': epoch,
-                    'loss': loss,
+                    'loss': smoothed_loss,
                     'seconds_per_step': seconds_per_step,
                     'learning_rate': learning_rate,
                     'grad_norm': grad_norm,
@@ -2278,7 +2300,9 @@ class Trainer:
                     logs=dict(self.log_history[-1]),
                 )
                 loss_text = (
-                    f'{loss:<7.4f}' if loss is not None else 'non-finite'
+                    f'{smoothed_loss:<7.4f}'
+                    if smoothed_loss is not None
+                    else 'non-finite'
                 )
                 learning_rate_text = (
                     f' [dim]┃ LR: {learning_rate:.3e}[/dim]'

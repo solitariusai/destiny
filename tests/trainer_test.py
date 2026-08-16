@@ -654,6 +654,34 @@ def test_trainer_records_log_interval_and_final_history():
     )
 
 
+def test_trainer_logs_rolling_average_loss():
+    def supplied_loss(model, batch):
+        return model.weight.value * 0.0 + batch['loss']
+
+    losses = [1.0, 3.0, 5.0, 7.0, 9.0]
+    trainer = Trainer(
+        TinyModel(),
+        TrainingConfig(
+            max_steps=len(losses),
+            log_interval=3,
+        ),
+        DatasetConfig(
+            [
+                {'loss': np.asarray(value, dtype=np.float32)}
+                for value in losses
+            ],
+            prefetch_size=0,
+        ),
+        loss_fn=supplied_loss,
+    )
+
+    trainer.train()
+
+    assert [record['step'] for record in trainer.log_history] == [3, 5]
+    assert trainer.log_history[0]['loss'] == pytest.approx(3.0)
+    assert trainer.log_history[1]['loss'] == pytest.approx(7.0)
+
+
 def test_default_optimizer_uses_and_logs_schedule():
     schedule = optax.linear_schedule(
         init_value=0.0,
