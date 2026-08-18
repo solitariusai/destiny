@@ -390,6 +390,33 @@ model.enable_remat()
 trainer.train()
 ```
 
+Remat is the largest single training-memory lever: with scanned layers it
+removes the per-layer residuals kept for the backward pass (measured ~10x
+reduction on a toy stack; current JAX versions store scan residuals per step,
+so scanning alone is not enough).
+
+The training loss tail — the `(sequence, vocab)` logits tensor — can be
+bounded with chunked cross entropy, which projects and reduces hidden states
+over sequence chunks inside a rematerialized scan:
+
+```python
+from functools import partial
+from taktiny.trainer.loss import causal_lm_loss
+
+loss_fn = partial(
+    causal_lm_loss,
+    logits_chunk_size=256,      # peak loss memory ~ chunk * vocab
+    attention_kernel='flash',   # or 'splash'/'dot_product'
+)
+trainer = Trainer(model, training_config, dataset_config, loss_fn=loss_fn)
+```
+
+`logits_chunk_size` is supported by models implementing
+`compute_causal_loss`; when both are set the peak loss memory scales with
+`chunk_size * vocab` instead of `sequence * vocab`. Gradient accumulation
+runs all microbatches of an optimizer step inside one jitted scan
+automatically when `jit_compile=True` and `gradient_accumulation_steps > 1`.
+
 Scheduled checkpoints can preserve exact stochastic and dataloader progress:
 
 ```python

@@ -153,3 +153,127 @@ def test_causal_lm_loss_converts_padding_mask_for_attention():
 def test_causal_lm_loss_requires_inputs_and_labels(batch):
     with pytest.raises(KeyError, match='missing'):
         causal_lm_loss(FixedLogitModel(jnp.zeros((1, 2, 3))), batch)
+
+
+def _tiny_llama():
+    from taktiny import nn, ModelConfig
+    from taktiny.maestro.opus.llama import Llama
+
+    config = ModelConfig(
+        num_hidden_layers=2,
+        vocab_size=512,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=128,
+        rope_theta=10000.0,
+        rms_norm_eps=1e-5,
+        dtype='float32',
+    )
+    return Llama(config, rngs=nn.Rngs(0), use_list=False)
+
+
+@pytest.mark.parametrize('logits_chunk_size', [1, 3, 7, 32, 100])
+def test_chunked_causal_loss_matches_full_loss(logits_chunk_size):
+    model = _tiny_llama()
+    key = jax.random.key(0)
+    k1, k2 = jax.random.split(key)
+    batch = {
+        'input_ids': jax.random.randint(k1, (2, 64), 0, 512),
+        'labels': jax.random.randint(k2, (2, 64), 0, 512),
+    }
+
+    full = causal_lm_loss(model, batch)
+    chunked = causal_lm_loss(
+        model,
+        batch,
+        logits_chunk_size=logits_chunk_size,
+    )
+
+    assert jnp.allclose(chunked, full, atol=1e-5)
+
+
+def test_chunked_causal_loss_matches_full_with_packing_and_masks():
+    model = _tiny_llama()
+    key = jax.random.key(1)
+    k1, k2 = jax.random.split(key)
+    input_ids = jax.random.randint(k1, (2, 40), 0, 512)
+    labels = jax.random.randint(k2, (2, 40), 0, 512)
+    positions = jnp.concatenate(
+        [jnp.arange(15), jnp.arange(25)]
+    )[None, :]
+    batch = {
+        'input_ids': input_ids,
+        'labels': labels,
+        'position_ids': jnp.broadcast_to(positions, (2, 40)),
+        'attention_mask': jnp.ones((2, 40), dtype=jnp.bool_),
+    }
+
+    full = causal_lm_loss(model, batch)
+    chunked = causal_lm_loss(model, batch, logits_chunk_size=7)
+
+    assert jnp.allclose(chunked, full, atol=1e-5)
+
+
+def test_chunked_causal_loss_respects_ignored_labels():
+    model = _tiny_llama()
+    key = jax.random.key(2)
+    k1, k2 = jax.random.split(key)
+    labels = jax.random.randint(k2, (2, 40), 0, 512)
+    labels = labels.at[:, 10:20].set(-100)
+    batch = {
+        'input_ids': jax.random.randint(k1, (2, 40), 0, 512),
+        'labels': labels,
+    }
+
+    full = causal_lm_loss(model, batch)
+    chunked = causal_lm_loss(model, batch, logits_chunk_size=6)
+
+    assert jnp.allclose(chunked, full, atol=1e-5)
+
+
+def test_chunked_causal_loss_requires_model_support():
+    model = FixedLogitModel(jnp.zeros((1, 2, 3)))
+    batch = {
+        'input_ids': jnp.ones((1, 2), dtype=jnp.int32),
+        'labels': jnp.ones((1, 2), dtype=jnp.int32),
+    }
+
+    with pytest.raises(TypeError, match='compute_causal_loss'):
+        causal_lm_loss(model, batch, logits_chunk_size=8)
+
+
+@pytest.mark.parametrize('logits_chunk_size', [0, -3])
+def test_chunked_causal_loss_validates_chunk_size(logits_chunk_size):
+    model = _tiny_llama()
+    batch = {
+        'input_ids': jnp.ones((1, 4), dtype=jnp.int32),
+        'labels': jnp.ones((1, 4), dtype=jnp.int32),
+    }
+
+    with pytest.raises(ValueError, match='logits_chunk_size'):
+        causal_lm_loss(model, batch, logits_chunk_size=logits_chunk_size)
+
+
+def test_causal_lm_loss_accepts_flash_attention_kernel():
+    model = _tiny_llama()
+    key = jax.random.key(4)
+    k1, k2 = jax.random.split(key)
+    batch = {
+        'input_ids': jax.random.randint(k1, (2, 32), 0, 512),
+        'labels': jax.random.randint(k2, (2, 32), 0, 512),
+    }
+
+    dot = causal_lm_loss(model, batch)
+    flash = causal_lm_loss(model, batch, attention_kernel='flash')
+    flash_chunked = causal_lm_loss(
+        model,
+        batch,
+        attention_kernel='flash',
+        logits_chunk_size=16,
+    )
+
+    assert jnp.allclose(flash, dot, atol=1e-4)
+    assert jnp.allclose(flash_chunked, dot, atol=1e-4)

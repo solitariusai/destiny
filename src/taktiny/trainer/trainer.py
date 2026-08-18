@@ -111,6 +111,55 @@ def _combine_params(trainable: PyTree, frozen: PyTree) -> PyTree:
     )
 
 
+def _global_grad_norm(grads: PyTree) -> jax.Array:
+    """Compute the L2 norm of a gradient tree without full-size copies.
+
+    Each leaf is contracted with itself through ``jnp.vdot``, which XLA lowers
+    to a fused dot with float32 accumulation; only a per-leaf scalar is
+    produced. No squared or cast copy of the gradient tree is ever allocated,
+    so the peak memory of the norm is negligible even for huge models.
+    Frozen leaves (``None``) are skipped.
+    """
+    norm_sq = jax.tree.reduce(
+        lambda acc, grad: (
+            acc
+            if grad is None
+            else acc + jnp.vdot(grad, grad).astype(jnp.float32)
+        ),
+        grads,
+        initializer=jnp.asarray(0.0, dtype=jnp.float32),
+        is_leaf=lambda value: value is None,
+    )
+    return jnp.sqrt(norm_sq)
+
+
+def _zeros_like_grads(params: PyTree) -> PyTree:
+    """Build a zero gradient accumulator matching a trainable parameter tree.
+
+    Frozen (``None``) leaves are preserved so the accumulator mirrors the
+    gradient tree returned by ``jax.value_and_grad``.
+    """
+    return jax.tree.map(
+        lambda value: (
+            None if value is None else jnp.zeros_like(value)
+        ),
+        params,
+        is_leaf=lambda value: value is None,
+    )
+
+
+def _accumulate_grads(total: PyTree, value: PyTree) -> PyTree:
+    """Sum two gradient trees, preserving frozen (``None``) leaves."""
+    return jax.tree.map(
+        lambda a, b: (
+            None if a is None or b is None else a + b
+        ),
+        total,
+        value,
+        is_leaf=lambda value: value is None,
+    )
+
+
 def _tree_shardings(tree: PyTree) -> PyTree:
     return jax.tree.map(
         lambda value: (
@@ -1750,8 +1799,7 @@ class Trainer:
             if use_loss_scaling:
                 grads = jax.tree.map(
                     lambda grad: (
-                        grad.astype(jnp.float32)
-                        / current_loss_scale.astype(jnp.float32)
+                        grad / current_loss_scale.astype(grad.dtype)
                     ),
                     grads,
                 )
@@ -1892,16 +1940,24 @@ class Trainer:
                     accumulated_microbatches,
                     dtype=jnp.float32,
                 )
+                # Divide in each gradient's own dtype: the previous float32
+                # divisor promoted every bf16 gradient to a full float32 copy.
+                # Integer microbatch counts are exact in bf16, so averaging
+                # stays exact for power-of-two counts and adds at most one
+                # bf16 rounding step otherwise.
                 averaged_grads = jax.tree.map(
-                    lambda value: value / divisor,
+                    lambda value: (
+                        None
+                        if value is None
+                        else value / divisor.astype(value.dtype)
+                    ),
                     accumulated_grads,
+                    is_leaf=lambda value: value is None,
                 )
                 averaged_loss = accumulated_loss / divisor
-                norm_grads = jax.tree.map(
-                    lambda value: value.astype(jnp.float32),
-                    averaged_grads,
-                )
-                current_grad_norm = optax.tree.norm(norm_grads)
+                # optax.tree.norm materializes a full squared copy of the
+                # gradient tree; the vdot reduction below never does.
+                current_grad_norm = _global_grad_norm(averaged_grads)
                 finite = (
                     jnp.isfinite(averaged_loss)
                     & jnp.isfinite(current_grad_norm)
@@ -1916,8 +1972,13 @@ class Trainer:
                         ),
                     )
                     averaged_grads = jax.tree.map(
-                        lambda value: value * clip_scale.astype(value.dtype),
+                        lambda value: (
+                            None
+                            if value is None
+                            else value * clip_scale.astype(value.dtype)
+                        ),
                         averaged_grads,
+                        is_leaf=lambda value: value is None,
                     )
 
                 loss_value, grad_norm_value, finite_value = jax.device_get(
@@ -1947,7 +2008,10 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(opt_state),
                             ),
-                            donate_argnums=(0, 1),
+                            # Donating averaged_grads lets XLA reuse its buffer
+                            # for the updates instead of allocating a fresh
+                            # full-size gradient tree inside the optimizer step.
+                            donate_argnums=(0, 1, 2),
                         )
                     update_fn = (
                         compiled_optimizer_step or optimizer_step
@@ -2163,73 +2227,212 @@ class Trainer:
                     self._place_batch,
                     prefetch_size,
                 )
-                for step_in_epoch, batch in enumerate(
-                    batches,
-                    start=enumerate_start,
-                ):
-                    if (
-                        compiled_gradient_step is None
-                        and self.training_config.jit_compile
-                    ):
-                        donate_argnums = ()
+                use_fused_accumulation = (
+                    self.training_config.jit_compile
+                    and accumulation_steps > 1
+                )
+                if use_fused_accumulation:
+                    # Fused microbatch loop: all microbatches of one optimizer
+                    # step run inside a single jitted ``lax.scan``. Gradient
+                    # trees never round-trip through Python and accumulate in
+                    # place inside the loop body, removing the per-microbatch
+                    # copies of the eager path. Microbatches must share one
+                    # batch structure; partial chunks at epoch boundaries reuse
+                    # the same compiled function through a per-size cache.
+                    fused_cache: dict[int, Any] = {}
+
+                    def make_fused_step(num_batches: int) -> Any:
+                        def fused_step(
+                            init_grads: Any,
+                            current_trainable: Any,
+                            current_frozen: Any,
+                            stacked_batch: Any,
+                            keys: Any,
+                            current_loss_scale: Any,
+                        ) -> tuple[Any, Any]:
+                            def accumulate_body(
+                                carry: Any,
+                                xs: Any,
+                            ) -> tuple[Any, Any]:
+                                acc_grads, acc_loss = carry
+                                batch, key = xs
+                                (_, loss), grads = loss_and_grad(
+                                    current_trainable,
+                                    current_frozen,
+                                    batch,
+                                    current_loss_scale,
+                                    key,
+                                )
+                                if use_loss_scaling:
+                                    grads = jax.tree.map(
+                                        lambda grad: (
+                                            grad
+                                            / current_loss_scale.astype(
+                                                grad.dtype
+                                            )
+                                        ),
+                                        grads,
+                                    )
+                                return (
+                                    _accumulate_grads(acc_grads, grads),
+                                    acc_loss + loss.astype(jnp.float32),
+                                ), None
+
+                            (acc_grads, acc_loss), _ = jax.lax.scan(
+                                accumulate_body,
+                                (
+                                    init_grads,
+                                    jnp.asarray(
+                                        0.0,
+                                        dtype=jnp.float32,
+                                    ),
+                                ),
+                                (stacked_batch, keys),
+                                length=num_batches,
+                            )
+                            return acc_grads, acc_loss
+
+                        return fused_step
+
+                    def get_fused_step(num_batches: int) -> Any:
+                        compiled = fused_cache.get(num_batches)
+                        if compiled is not None:
+                            return compiled
+                        donate_argnums = (0,)
                         if self.training_config.donate_batch:
-                            donate_argnums = (2,)
-                        compiled_gradient_step = jax.jit(
-                            gradient_step,
+                            donate_argnums = (0, 3)
+                        compiled = jax.jit(
+                            make_fused_step(num_batches),
                             in_shardings=(
                                 _tree_shardings(trainable_params),
+                                _tree_shardings(trainable_params),
                                 _tree_shardings(frozen_params),
-                                _tree_shardings(batch),
+                                None,
                                 None,
                                 None,
                             ),
                             out_shardings=(
-                                None,
                                 _tree_shardings(trainable_params),
+                                None,
                             ),
                             donate_argnums=donate_argnums,
                         )
-                    current_gradient_step = (
-                        compiled_gradient_step or gradient_step
-                    )
-                    microbatch_loss, microbatch_grads = (
-                        current_gradient_step(
-                            trainable_params,
-                            frozen_params,
-                            batch,
-                            jnp.asarray(
-                                self.loss_scale,
-                                dtype=jnp.float32,
-                            ),
+                        fused_cache[num_batches] = compiled
+                        return compiled
+
+                    step_in_epoch = enumerate_start - 1
+                    while True:
+                        if should_stop:
+                            break
+                        chunk = list(
+                            islice(batches, accumulation_steps)
+                        )
+                        if not chunk:
+                            break
+                        num_batches = len(chunk)
+                        stacked_batch = jax.tree.map(
+                            lambda *values: jnp.stack(values),
+                            *chunk,
+                        )
+                        keys = jnp.stack([
                             jax.random.fold_in(
                                 self.rngs(),
                                 jax.process_index(),
-                            ),
+                            )
+                            for _ in range(num_batches)
+                        ])
+                        accumulated_grads, accumulated_loss = (
+                            get_fused_step(num_batches)(
+                                _zeros_like_grads(trainable_params),
+                                trainable_params,
+                                frozen_params,
+                                stacked_batch,
+                                keys,
+                                jnp.asarray(
+                                    self.loss_scale,
+                                    dtype=jnp.float32,
+                                ),
+                            )
                         )
-                    )
-                    if accumulated_grads is None:
-                        accumulated_grads = microbatch_grads
-                        accumulated_loss = microbatch_loss.astype(jnp.float32)
-                    else:
-                        accumulated_grads = jax.tree.map(
-                            lambda total, value: total + value,
-                            accumulated_grads,
-                            microbatch_grads,
-                        )
-                        accumulated_loss = (
-                            accumulated_loss
-                            + microbatch_loss.astype(jnp.float32)
-                        )
-                    accumulated_microbatches += 1
-                    self.micro_step += 1
-                    microbatches_run_this_call += 1
+                        accumulated_microbatches = num_batches
+                        step_in_epoch += num_batches
+                        self.micro_step += num_batches
+                        microbatches_run_this_call += num_batches
 
-                    if accumulated_microbatches == accumulation_steps:
-                        finish_accumulation(epoch, step_in_epoch)
-                        epoch_updates_run += 1
-                    if should_stop:
-                        break
-                batches.close()
+                        if accumulated_microbatches == accumulation_steps:
+                            finish_accumulation(epoch, step_in_epoch)
+                            epoch_updates_run += 1
+                    batches.close()
+
+                else:
+                    for step_in_epoch, batch in enumerate(
+                        batches,
+                        start=enumerate_start,
+                    ):
+                        if (
+                            compiled_gradient_step is None
+                            and self.training_config.jit_compile
+                        ):
+                            donate_argnums = ()
+                            if self.training_config.donate_batch:
+                                donate_argnums = (2,)
+                            compiled_gradient_step = jax.jit(
+                                gradient_step,
+                                in_shardings=(
+                                    _tree_shardings(trainable_params),
+                                    _tree_shardings(frozen_params),
+                                    _tree_shardings(batch),
+                                    None,
+                                    None,
+                                ),
+                                out_shardings=(
+                                    None,
+                                    _tree_shardings(trainable_params),
+                                ),
+                                donate_argnums=donate_argnums,
+                            )
+                        current_gradient_step = (
+                            compiled_gradient_step or gradient_step
+                        )
+                        microbatch_loss, microbatch_grads = (
+                            current_gradient_step(
+                                trainable_params,
+                                frozen_params,
+                                batch,
+                                jnp.asarray(
+                                    self.loss_scale,
+                                    dtype=jnp.float32,
+                                ),
+                                jax.random.fold_in(
+                                    self.rngs(),
+                                    jax.process_index(),
+                                ),
+                            )
+                        )
+                        if accumulated_grads is None:
+                            accumulated_grads = microbatch_grads
+                            accumulated_loss = microbatch_loss.astype(
+                                jnp.float32
+                            )
+                        else:
+                            accumulated_grads = _accumulate_grads(
+                                accumulated_grads,
+                                microbatch_grads,
+                            )
+                            accumulated_loss = (
+                                accumulated_loss
+                                + microbatch_loss.astype(jnp.float32)
+                            )
+                        accumulated_microbatches += 1
+                        self.micro_step += 1
+                        microbatches_run_this_call += 1
+
+                        if accumulated_microbatches == accumulation_steps:
+                            finish_accumulation(epoch, step_in_epoch)
+                            epoch_updates_run += 1
+                        if should_stop:
+                            break
+                    batches.close()
 
                 if accumulated_microbatches and not should_stop:
                     finish_accumulation(epoch, step_in_epoch)

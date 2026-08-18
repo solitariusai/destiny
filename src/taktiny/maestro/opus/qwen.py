@@ -62,6 +62,10 @@ class Qwen(TransformerCausalLM):
             config = kwargs.pop('config')
         else:
             config = ModelConfig.load_config(path_or_repo, local=local)
+        if config is None:
+            raise ValueError(
+                f'Unable to load config from {path_or_repo!r} (local={local})'
+            )
 
         def split_qkv(value: tp.Any) -> tp.Any:
             return jnp.split(value, 3, axis=0)

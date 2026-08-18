@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import pytest
 
 from taktiny import nn
 from taktiny.layers import RotaryEmbedding
@@ -182,3 +183,29 @@ def test_scanned_gemma3_matches_unrolled_local_global_attention():
     assert isinstance(scanned.model.layers, nn.SeqStack)
     assert not scanned.model.use_list
     assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_local_load_config_missing_file_raises_file_not_found():
+    missing = '/nonexistent/taktiny/checkpoint'
+
+    with pytest.raises(FileNotFoundError):
+        ModelConfig.load_config(missing, local=True)
+
+
+def test_local_load_config_honors_custom_filename(tmp_path):
+    (tmp_path / 'custom.json').write_text('{"vocab_size": 16}')
+
+    config = ModelConfig.load_config(
+        str(tmp_path),
+        filename='custom.json',
+        local=True,
+    )
+
+    assert config.vocab_size == 16
+
+
+def test_local_from_pretrained_missing_config_raises_clear_error():
+    missing = '/nonexistent/taktiny/checkpoint'
+
+    with pytest.raises(FileNotFoundError):
+        Llama.from_pretrained(missing, local=True)

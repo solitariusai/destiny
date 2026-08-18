@@ -1983,6 +1983,27 @@ class TransformerCausalLM(PretrainedModel):
                 axis=1,
             )
 
+        logits = self._compute_logits(
+            x,
+            out_sharding=self.logits_out_sharding,
+        )
+
+        if ctx is not None and new_cache is not None:
+            ctx = replace(
+                ctx,
+                key_cache=new_cache[0],
+                value_cache=new_cache[1],
+            )
+
+        return logits, ctx
+
+    def _compute_logits(
+        self,
+        x: jax.Array,
+        *,
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> jax.Array:
+        """Project hidden states to vocabulary logits."""
         if self.tied_word_embeddings:
             weight = self.model.embed_tokens.embedding.value
             if isinstance(weight, qwix.QArray):
@@ -1998,25 +2019,195 @@ class TransformerCausalLM(PretrainedModel):
                 )
             else:
                 logits = jnp.einsum('...d,vd->...v', x, weight)
-            if self.logits_out_sharding is not None:
+            if out_sharding is not None:
                 logits = jax.lax.with_sharding_constraint(
                     logits,
-                    self.logits_out_sharding,
+                    out_sharding,
                 )
         else:
             logits = self.lm_head(
                 x,
-                out_sharding=self.logits_out_sharding,
+                out_sharding=out_sharding,
+            )
+        return logits
+
+    def compute_causal_loss(
+        self,
+        input_ids: jax.Array,
+        labels: jax.Array,
+        *,
+        attention_mask: jax.Array | None = None,
+        position_ids: jax.Array | None = None,
+        ignore_index: int = -100,
+        logits_chunk_size: int = 256,
+        attention_kernel: str = 'dot_product',
+        reduction: str = 'mean',
+    ) -> jax.Array:
+        """Causal language-model loss with chunked vocabulary projections.
+
+        The decoder runs once over the full sequence; the LM head and cross
+        entropy are then applied over ``logits_chunk_size``-sized sequence
+        chunks inside a rematerialized ``lax.scan``. Only one chunk of logits
+        exists at a time, so the loss tail allocates
+        ``chunk_size * vocab`` instead of ``sequence * vocab`` bytes.
+        """
+        if reduction not in {'sum', 'mean'}:
+            raise ValueError(
+                'chunked causal loss supports only "sum" and "mean" '
+                'reductions'
+            )
+        if not isinstance(logits_chunk_size, int) or logits_chunk_size <= 0:
+            raise ValueError('logits_chunk_size must be a positive integer')
+
+        input_ids = jnp.asarray(input_ids)
+        labels = jnp.asarray(labels)
+        if input_ids.ndim != 2:
+            raise ValueError(
+                'input_ids must have shape [batch, sequence], '
+                f'got {input_ids.shape}'
+            )
+        if labels.shape != input_ids.shape:
+            raise ValueError(
+                'labels and input_ids must have equal shapes, got '
+                f'{labels.shape} and {input_ids.shape}'
+            )
+        if input_ids.shape[1] < 2:
+            raise ValueError('causal LM loss requires at least two tokens')
+
+        token_mask = None
+        attention_mask_4d = None
+        if attention_mask is not None:
+            attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
+            if attention_mask.ndim == 2:
+                if attention_mask.shape != input_ids.shape:
+                    raise ValueError(
+                        'a two-dimensional attention_mask must match '
+                        'input_ids'
+                    )
+                token_mask = attention_mask
+                attention_mask_4d = attention_mask[:, None, None, :]
+            elif attention_mask.ndim in (3, 4):
+                attention_mask_4d = attention_mask
+            else:
+                raise ValueError(
+                    'attention_mask must have two, three, or four dimensions'
+                )
+
+        if position_ids is not None:
+            position_ids = jnp.asarray(position_ids, dtype=jnp.int32)
+            if position_ids.shape != input_ids.shape:
+                raise ValueError(
+                    'position_ids and input_ids must have equal shapes'
+                )
+
+        x, _ = self.model(
+            input_ids,
+            attention_mask=attention_mask_4d,
+            kv_cache=None,
+            position_idx=position_ids,
+            is_causal=True,
+            out_sharding=self.model_out_sharding,
+            attention_kernel=attention_kernel,
+        )
+
+        # Predictions cover positions [0, seq-1); labels are shifted by one.
+        num_positions = input_ids.shape[1] - 1
+        x = x[:, :num_positions, :]
+        labels_shifted = labels[:, 1:]
+        target_mask = None
+        if token_mask is not None:
+            target_mask = token_mask[:, 1:]
+        if position_ids is not None:
+            boundaries = position_ids[:, 1:] != 0
+            target_mask = (
+                boundaries
+                if target_mask is None
+                else target_mask & boundaries
             )
 
-        if ctx is not None and new_cache is not None:
-            ctx = replace(
-                ctx,
-                key_cache=new_cache[0],
-                value_cache=new_cache[1],
+        # Pad the prediction axis to whole chunks so every chunk has a static
+        # size inside the scan. Padded logits never contribute to the loss.
+        chunk_size = min(logits_chunk_size, num_positions)
+        num_chunks = (
+            num_positions + chunk_size - 1
+        ) // chunk_size
+        pad = num_chunks * chunk_size - num_positions
+        if pad:
+            x = jnp.pad(x, ((0, 0), (0, pad), (0, 0)))
+            labels_shifted = jnp.pad(
+                labels_shifted,
+                ((0, 0), (0, pad)),
+                constant_values=ignore_index,
             )
+            if target_mask is not None:
+                target_mask = jnp.pad(
+                    target_mask,
+                    ((0, 0), (0, pad)),
+                )
 
-        return logits, ctx
+        # Lazy import: taktiny.trainer is not on the import path of this
+        # module, so importing it eagerly would create a cycle.
+        from taktiny.trainer.loss.classification import cross_entropy_loss
+
+        def chunk_loss(
+            x_chunk: jax.Array,
+            labels_chunk: jax.Array,
+            mask_chunk: jax.Array | None,
+        ) -> tuple[jax.Array, jax.Array]:
+            logits_chunk = self._compute_logits(x_chunk)
+            chunk_total = cross_entropy_loss(
+                logits_chunk,
+                labels_chunk,
+                mask=mask_chunk,
+                ignore_index=ignore_index,
+                reduction='sum',
+            )
+            selected = labels_chunk != ignore_index
+            if mask_chunk is not None:
+                selected &= mask_chunk
+            count = jnp.sum(selected, dtype=jnp.float32)
+            return chunk_total, count
+
+        @jax.checkpoint
+        def scan_body(
+            carry: tuple[jax.Array, jax.Array],
+            index: jax.Array,
+        ) -> tuple[tuple[jax.Array, jax.Array], None]:
+            loss_sum, count_sum = carry
+            start = index * chunk_size
+            x_chunk = jax.lax.dynamic_slice_in_dim(
+                x, start, chunk_size, axis=1
+            )
+            labels_chunk = jax.lax.dynamic_slice_in_dim(
+                labels_shifted, start, chunk_size, axis=1
+            )
+            mask_chunk = None
+            if target_mask is not None:
+                mask_chunk = jax.lax.dynamic_slice_in_dim(
+                    target_mask, start, chunk_size, axis=1
+                )
+            chunk_total, chunk_count = chunk_loss(
+                x_chunk,
+                labels_chunk,
+                mask_chunk,
+            )
+            return (
+                loss_sum + chunk_total,
+                count_sum + chunk_count,
+            ), None
+
+        (loss_sum, count), _ = jax.lax.scan(
+            scan_body,
+            (
+                jnp.asarray(0.0, dtype=jnp.float32),
+                jnp.asarray(0.0, dtype=jnp.float32),
+            ),
+            jnp.arange(num_chunks, dtype=jnp.int32),
+        )
+
+        if reduction == 'sum':
+            return loss_sum
+        return loss_sum / jnp.maximum(count, 1.0)
 
     @classmethod
     def _load_from_pretrained(
@@ -2069,6 +2260,10 @@ class TransformerCausalLM(PretrainedModel):
             config = kwargs.pop('config')
         else:
             config = ModelConfig.load_config(path_or_repo, local=local)
+        if config is None:
+            raise ValueError(
+                f'Unable to load config from {path_or_repo!r} (local={local})'
+            )
 
         # Define how HuggingFace weights map to components using new Tuple format
         module_map = module_map or []
@@ -3005,6 +3200,10 @@ class TransformerConditionalGeneration(PretrainedModel):
             config = kwargs.pop('config')
         else:
             config = ModelConfig.load_config(path_or_repo, local=local)
+        if config is None:
+            raise ValueError(
+                f'Unable to load config from {path_or_repo!r} (local={local})'
+            )
 
         module_map = [
             ("model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),

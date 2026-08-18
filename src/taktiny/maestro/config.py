@@ -62,7 +62,13 @@ class ModelConfig:
             if subfolder:
                 config_path = config_path / subfolder
 
-            config_path = config_path / 'config.json'
+            config_path = config_path / filename
+            if not config_path.is_file():
+                raise FileNotFoundError(
+                    f'config file not found: {config_path}. With local=True, '
+                    f'{path_or_repo!r} must be a local checkpoint directory '
+                    f'containing {filename!r}.'
+                )
         else:
             try:
                 config_path = hf_hub_download(

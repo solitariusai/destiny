@@ -97,7 +97,7 @@ class Maestro:
         Returns:
             ``True`` when the architecture can be resolved by Maestro.
         """
-        return True if model_class in repertoire.available() else False
+        return model_class in repertoire
 
     @classmethod
     def _get_architecture_class(

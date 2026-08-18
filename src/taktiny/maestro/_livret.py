@@ -32,7 +32,10 @@ class Repertoire:
         self._repertoire[key] = cls
 
     def available(self) -> Any:
-        return list(self._repertoire.keys())
+        return sorted(self._repertoire.keys())
+
+    def __contains__(self, key: Any) -> bool:
+        return key in self._repertoire
 
     def available_classes(self) -> Any:
         return self._classes

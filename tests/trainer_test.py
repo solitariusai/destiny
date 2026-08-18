@@ -27,6 +27,7 @@ from taktiny.trainer import (
 )
 from taktiny.trainer.trainer import (
     _format_iteration_time,
+    _global_grad_norm,
     _parameter_labels,
     _partition_params,
     _place_trainable_params,
@@ -275,6 +276,44 @@ def test_trainer_updates_only_trainable_parameters(jit_compile):
 
     assert float(model.weight.value) != 0.0
     assert float(model.frozen.value) == 3.0
+
+
+def test_gradient_accumulation_fused_scan_matches_eager_path():
+    def run(jit_compile):
+        model = TinyModel()
+        batches = [
+            {
+                'x': np.asarray([1.0], dtype=np.float32),
+                'y': np.asarray([2.0], dtype=np.float32),
+            },
+            {
+                'x': np.asarray([3.0], dtype=np.float32),
+                'y': np.asarray([1.0], dtype=np.float32),
+            },
+        ]
+        trainer = Trainer(
+            model,
+            TrainingConfig(
+                max_steps=1,
+                learning_rate=0.1,
+                log_interval=1,
+                jit_compile=jit_compile,
+                gradient_accumulation_steps=2,
+            ),
+            DatasetConfig(batches, prefetch_size=2),
+            loss_fn=squared_error,
+        )
+        trainer.train()
+        return float(model.weight.value), trainer.log_history
+
+    eager_weight, eager_history = run(jit_compile=False)
+    fused_weight, fused_history = run(jit_compile=True)
+
+    assert eager_weight != 0.0
+    assert fused_weight == pytest.approx(eager_weight)
+    assert fused_history[-1]['loss'] == pytest.approx(
+        eager_history[-1]['loss']
+    )
 
 
 def test_trainer_rejects_empty_dataloader():
@@ -1897,3 +1936,57 @@ def test_dataset_config_requires_train_dataloader():
         match='train_dataloader is required',
     ):
         DatasetConfig()
+
+
+def test_global_grad_norm_matches_optax_for_float32():
+    key = jax.random.key(7)
+    grads = {
+        'w': jax.random.normal(key, (4, 8)),
+        'b': jax.random.normal(jax.random.fold_in(key, 1), (8,)),
+    }
+    expected = optax.tree.norm(
+        jax.tree.map(lambda value: value.astype(jnp.float32), grads)
+    )
+
+    actual = _global_grad_norm(grads)
+
+    assert jnp.allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_global_grad_norm_matches_optax_for_bfloat16():
+    key = jax.random.key(8)
+    grads = {
+        'w': jax.random.normal(key, (16, 16), dtype=jnp.bfloat16),
+        'b': jax.random.normal(
+            jax.random.fold_in(key, 1),
+            (16,),
+            dtype=jnp.bfloat16,
+        ),
+    }
+    expected = optax.tree.norm(
+        jax.tree.map(lambda value: value.astype(jnp.float32), grads)
+    )
+
+    actual = _global_grad_norm(grads)
+
+    # bf16 leaves are accumulated by XLA in f32; allow bf16 rounding error.
+    assert jnp.allclose(actual, expected, rtol=5e-2, atol=5e-2)
+
+
+def test_global_grad_norm_handles_mixed_dtypes_and_zero_leaves():
+    grads = {
+        'f32': jnp.asarray([[1.0, -2.0], [3.0, -4.0]], dtype=jnp.float32),
+        'bf16': jnp.asarray([2.0, 2.0], dtype=jnp.bfloat16),
+        'zero': jnp.zeros((3, 3), dtype=jnp.float32),
+    }
+    expected = optax.tree.norm(
+        jax.tree.map(lambda value: value.astype(jnp.float32), grads)
+    )
+
+    actual = _global_grad_norm(grads)
+
+    assert jnp.allclose(actual, expected, rtol=5e-2, atol=5e-2)
+
+
+def test_global_grad_norm_of_empty_tree_is_zero():
+    assert float(_global_grad_norm({})) == 0.0
