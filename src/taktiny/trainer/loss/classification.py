@@ -69,16 +69,23 @@ def cross_entropy_loss(
         selected &= mask
 
     safe_labels = jnp.where(selected, labels, 0)
-    log_probabilities = jax.nn.log_softmax(
-        logits.astype(jnp.float32),
-        axis=-1,
-    )
-    losses = -jnp.take_along_axis(
-        log_probabilities,
-        safe_labels[..., None],
-        axis=-1,
-    )[..., 0]
-    losses = jnp.where(selected, losses, 0.0)
+
+    # Compute loss iteratively over the batch dimension to save HBM
+    # since log_softmax on [18, 512, 82369] takes 12GB of temporaries.
+    def _compute_loss_batch(inputs):
+        l_batch, label_batch, sel_batch = inputs
+        log_probs = jax.nn.log_softmax(l_batch.astype(jnp.float32), axis=-1)
+        # log_probs: [T, V] or [..., V]
+        # label_batch: [T] or [...]
+        loss = -jnp.take_along_axis(
+            log_probs,
+            label_batch[..., None],
+            axis=-1,
+        )[..., 0]
+        return jnp.where(sel_batch, loss, 0.0)
+
+    # Use map to prevent materialization of massive intermediate buffers
+    losses = jax.lax.map(_compute_loss_batch, (logits, safe_labels, selected))
 
     if reduction == 'none':
         return losses
