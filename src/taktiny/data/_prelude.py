@@ -227,7 +227,7 @@ class DatasetUtils:
         sampler: grain.Sampler | None = None,
         shuffle: bool = False,
         seed: int = 0,
-        num_epochs: int | None = None,
+        num_epochs: int | None = 1,
         shard_index: int = 0,
         shard_count: int = 1,
         worker_count: int | None = 0,
@@ -243,7 +243,8 @@ class DatasetUtils:
         When ``sampler`` is omitted, an :class:`grain.IndexSampler` is created
         from the remaining sampling arguments. Supplying ``sampler`` transfers
         sampling and sharding responsibility entirely to that object. The
-        default ``num_epochs=None`` creates an unbounded loader.
+        default ``num_epochs=1`` creates a single-epoch (finite) loader; pass
+        ``None`` for an unbounded loader.
         """
         if not hasattr(source, '__getitem__'):
             raise TypeError('source must support random access')

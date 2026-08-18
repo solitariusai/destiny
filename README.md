@@ -300,7 +300,6 @@ trainer = Trainer(
     model=model,
     loss_fn=loss_fn,
     training_config=TrainingConfig(
-        epochs=1,
         max_steps=1_000,
         optimizer=optax.adamw(3e-4),
         log_interval=10,
@@ -363,6 +362,26 @@ trainer = Trainer(model, training_config, dataset_config, loss_fn=loss_fn)
 `chunk_size * vocab` instead of `sequence * vocab`. Gradient accumulation
 runs all microbatches of an optimizer step inside one jitted scan
 automatically when `jit_compile=True` and `gradient_accumulation_steps > 1`.
+
+### Exponential Moving Average
+
+`TrainingConfig.ema_decay` enables a running average of the weights, kept in
+the Trainer (not the model) and saved alongside each checkpoint:
+
+```python
+training_config = TrainingConfig(ema_decay=0.9999)
+trainer = Trainer(model, training_config, dataset_config, loss_fn=loss_fn)
+trainer.train()
+
+ema_model = trainer.ema   # a fresh model with the averaged weights
+ema_model.save_pretrained('checkpoints/ema')
+```
+
+`ema_decay` accepts a value in `(0, 1)` (larger = smoother, slower). The EMA
+tree is updated each optimizer step and written to `ema.safetensors` inside
+checkpoint directories, so it is restored when training resumes. The trained
+model is left untouched; `trainer.ema` returns an independent copy of the
+averaged weights.
 
 Scheduled checkpoints can preserve exact stochastic and dataloader progress:
 

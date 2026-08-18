@@ -160,6 +160,40 @@ def _accumulate_grads(total: PyTree, value: PyTree) -> PyTree:
     )
 
 
+def _copy_tree(tree: PyTree) -> PyTree:
+    """Return a fresh structure with independent array leaves."""
+    return jax.tree.map(
+        lambda value: (
+            value.copy()
+            if hasattr(value, 'dtype')
+            else copy.deepcopy(value)
+        ),
+        tree,
+    )
+
+
+def _ema_update(
+    ema: PyTree,
+    params: PyTree,
+    decay: float,
+) -> PyTree:
+    """Blend the EMA tree toward the current weights, in the weights' dtype.
+
+    Frozen (``None``) leaves are passed through unchanged.
+    """
+    def blend(ema_value: Any, param_value: Any) -> Any:
+        if ema_value is None or param_value is None:
+            return param_value
+        return ema_value * decay + param_value * (1.0 - decay)
+
+    return jax.tree.map(
+        blend,
+        ema,
+        params,
+        is_leaf=lambda value: value is None,
+    )
+
+
 def _tree_shardings(tree: PyTree) -> PyTree:
     return jax.tree.map(
         lambda value: (
@@ -468,6 +502,7 @@ class Trainer:
         self.micro_step = 0
         self.last_grad_norm = None
         self.last_update_skipped = False
+        self._ema = None
         self._active_data_iterator = None
         self.rngs = Rngs(self.training_config.seed)
         self._loss_accepts_rng = self._callable_accepts_rng(loss_fn)
@@ -760,6 +795,28 @@ class Trainer:
         else:
             raise ValueError("Unsupported model type")
 
+    @property
+    def ema(self) -> Module:
+        """A fresh model holding the EMA weights, without touching ``self.model``.
+
+        Only available when ``TrainingConfig.ema_decay`` is set. Each access
+        returns an independent copy, so callers can evaluate or save it freely.
+        """
+        if self._ema is None:
+            raise RuntimeError(
+                'EMA is disabled; set TrainingConfig.ema_decay to enable it'
+            )
+        return _copy_tree(self._ema)
+
+    def _ema_snapshot(self) -> dict[str, Any] | None:
+        """A host copy of the EMA leaves, or ``None`` when EMA is disabled."""
+        if self._ema is None:
+            return None
+        return {
+            name: np.array(jax.device_get(value), copy=True)
+            for name, value in self._ema.flat_state_dict().items()
+        }
+
     def _setup_optimizer(self, params: PyTree) -> optax.GradientTransformation:
         """Configure an optimizer for the trainable parameter partition."""
         base_opt = self.training_config.optimizer
@@ -959,7 +1016,6 @@ class Trainer:
         metrics = self._evaluate_params(params)
         record = {
             'step': step,
-            'epoch': epoch,
             **metrics,
         }
         self.log_history.append(record)
@@ -1152,6 +1208,7 @@ class Trainer:
                 checkpointer.close()
 
             self.model.load_flat_state_dict(restored)
+            self._load_ema(checkpoint_path)
             return
 
         adapter_config = os.path.join(
@@ -1195,6 +1252,7 @@ class Trainer:
                 checkpoint_path,
                 local=True,
             )
+            self._load_ema(checkpoint_path)
             return
 
         if not has_model:
@@ -1211,6 +1269,112 @@ class Trainer:
             )
 
         load_pretrained(checkpoint_path)
+        self._load_ema(checkpoint_path)
+
+    def _load_ema(self, checkpoint_path: str) -> None:
+        """Restore the EMA tree from a checkpoint, if present and enabled."""
+        if self.training_config.ema_decay is None:
+            return
+        if self.model_type != 'taktiny':
+            raise TypeError('EMA checkpoints require a Taktiny Module')
+
+        self._ema = _copy_tree(self.extract_params())
+
+        single_path = os.path.join(
+            checkpoint_path,
+            'model-ema.safetensors',
+        )
+        index_path = os.path.join(
+            checkpoint_path,
+            'model-ema.safetensors.index.json',
+        )
+
+        from safetensors.numpy import load_file
+
+        if os.path.isfile(index_path):
+            with open(index_path) as f:
+                weight_map = json.load(f).get('weight_map', {})
+            flat: dict[str, Any] = {}
+            for shard in sorted(set(weight_map.values())):
+                shard_path = os.path.join(checkpoint_path, shard)
+                if not os.path.isfile(shard_path):
+                    raise FileNotFoundError(
+                        f'EMA shard not found: {shard_path}'
+                    )
+                flat.update(load_file(shard_path))
+        elif os.path.isfile(single_path):
+            flat = load_file(single_path)
+        else:
+            # Checkpoint predates EMA support; start the EMA from the
+            # restored weights.
+            return
+
+        self._ema.load_flat_state_dict({
+            name: jnp.asarray(value)
+            for name, value in flat.items()
+        })
+
+    def _write_ema_checkpoint(
+        self,
+        temporary_path: str,
+        ema_snapshot: dict[str, Any],
+    ) -> None:
+        """Write the EMA weights using the model's sharded checkpoint layout.
+
+        The EMA files mirror the model's own ``model*.safetensors`` naming
+        with an ``-ema`` suffix, so a sharded model produces e.g.
+        ``model-00001-of-00002-ema.safetensors`` plus a
+        ``model-ema.safetensors.index.json`` index. A single-shard model
+        writes ``model-ema.safetensors``.
+        """
+        if self.model_type != 'taktiny':
+            raise TypeError('EMA checkpoints require a Taktiny Module')
+
+        staging = os.path.join(temporary_path, '_ema_staging')
+        ema_model = _copy_tree(self.model)
+        ema_model.load_flat_state_dict({
+            name: jnp.asarray(value)
+            for name, value in ema_snapshot.items()
+        })
+        ema_model.save_pretrained(
+            staging,
+            max_shard_size=self.training_config.max_shard_size,
+        )
+
+        # Move only the model weight files, renamed with an -ema suffix; the
+        # config and other files are already written by the main model save.
+        for name in os.listdir(staging):
+            if not name.startswith('model'):
+                continue
+            renamed = name
+            if name == 'model.safetensors':
+                renamed = 'model-ema.safetensors'
+            elif name.startswith('model-') and name.endswith('.safetensors'):
+                renamed = name[:-len('.safetensors')] + '-ema.safetensors'
+            elif name == 'model.safetensors.index.json':
+                renamed = 'model-ema.safetensors.index.json'
+            else:
+                continue
+            os.replace(
+                os.path.join(staging, name),
+                os.path.join(temporary_path, renamed),
+            )
+        shutil.rmtree(staging, ignore_errors=True)
+
+        # Point the index's weight_map at the -ema shard filenames.
+        index_path = os.path.join(
+            temporary_path,
+            'model-ema.safetensors.index.json',
+        )
+        if os.path.isfile(index_path):
+            with open(index_path) as f:
+                index = json.load(f)
+            index['weight_map'] = {
+                key: value[:-len('.safetensors')] + '-ema.safetensors'
+                for key, value in index.get('weight_map', {}).items()
+            }
+            with open(index_path, 'w') as f:
+                json.dump(index, f)
 
     def _write_trainer_state(
         self,
@@ -1316,6 +1480,7 @@ class Trainer:
         *,
         model_snapshot: Any,
         optimizer_state: PyTree,
+        ema_snapshot: dict[str, Any] | None = None,
         dataloader_state: tuple[str, Any] | None,
         rng_state: Mapping[str, Any],
         trainer_state: Mapping[str, Any],
@@ -1375,6 +1540,12 @@ class Trainer:
                         max_shard_size=(
                             self.training_config.max_shard_size
                         ),
+                    )
+
+                if ema_snapshot is not None:
+                    self._write_ema_checkpoint(
+                        temporary_path,
+                        ema_snapshot,
                     )
 
             self._sync_hosts(f'taktiny-checkpoint-model-{barrier_name}')
@@ -1517,6 +1688,7 @@ class Trainer:
                 )
             model_snapshot = snapshot()
             optimizer_state = self._host_snapshot(opt_state)
+            ema_snapshot = self._ema_snapshot()
             if self._checkpoint_executor is None:
                 self._checkpoint_executor = ThreadPoolExecutor(
                     max_workers=1,
@@ -1528,6 +1700,7 @@ class Trainer:
                 checkpoint_path,
                 model_snapshot=model_snapshot,
                 optimizer_state=optimizer_state,
+                ema_snapshot=ema_snapshot,
                 dataloader_state=dataloader_state,
                 rng_state=rng_state,
                 trainer_state=trainer_state,
@@ -1540,6 +1713,7 @@ class Trainer:
             checkpoint_path,
             model_snapshot=None,
             optimizer_state=opt_state,
+            ema_snapshot=self._ema_snapshot(),
             dataloader_state=dataloader_state,
             rng_state=rng_state,
             trainer_state=trainer_state,
@@ -1610,7 +1784,6 @@ class Trainer:
             f'[cyan]{self.model_type.upper()}[/cyan] model[/bold green]'
         )
         console.print(
-            f'Epochs: [bold]{self.training_config.epochs}[/bold] | '
             f'Max Steps: [bold]{self.training_config.max_steps}[/bold]'
         )
 
@@ -1714,9 +1887,16 @@ class Trainer:
             self._mesh,
         )
         if self.model_type == 'taktiny':
-            self._inject_params(
-                _combine_params(trainable_params, frozen_params)
+            initial_params = _combine_params(
+                trainable_params,
+                frozen_params,
             )
+            self._inject_params(initial_params)
+            if (
+                self.training_config.ema_decay is not None
+                and self._ema is None
+            ):
+                self._ema = _copy_tree(initial_params)
 
         optimizer = self._setup_optimizer(trainable_params)
         opt_state = optimizer.init(trainable_params)
@@ -1856,13 +2036,12 @@ class Trainer:
 
         grad_norm = None
         update_skipped = False
-        start_epoch = resume_state['epoch'] if resume_state else 0
         resume_step_in_epoch = (
             resume_state['step_in_epoch']
             if resume_state
             else 0
         )
-        epoch = start_epoch
+        epoch = 0
         step_in_epoch = resume_step_in_epoch
         accumulation_steps = (
             self.training_config.gradient_accumulation_steps
@@ -1879,11 +2058,8 @@ class Trainer:
             except TypeError:
                 dataloader_length = None
             if dataloader_length is not None:
-                updates_per_epoch = math.ceil(
+                total_steps = math.ceil(
                     dataloader_length / accumulation_steps
-                )
-                total_steps = (
-                    updates_per_epoch * self.training_config.epochs
                 )
         if self.training_config.max_steps is not None:
             total_steps = self.training_config.max_steps
@@ -2036,6 +2212,18 @@ class Trainer:
                         opt_state,
                         averaged_grads,
                     )
+                    if (
+                        self._ema is not None
+                        and self.training_config.ema_decay is not None
+                    ):
+                        self._ema = _ema_update(
+                            self._ema,
+                            _combine_params(
+                                trainable_params,
+                                frozen_params,
+                            ),
+                            self.training_config.ema_decay,
+                        )
                 else:
                     self.skipped_updates += 1
 
@@ -2070,7 +2258,6 @@ class Trainer:
                 learning_rate = self._learning_rate_at_step(step)
                 step_logs = {
                     'step': step,
-                    'epoch': current_epoch,
                     'loss': loss,
                     'learning_rate': learning_rate,
                     'grad_norm': grad_norm,
@@ -2127,7 +2314,6 @@ class Trainer:
                         else ''
                     )
                     progress.console.print(
-                        f"[bold cyan]Epoch {current_epoch:<3}[/bold cyan] ┃ "
                         f"[bold cyan]Step {step:<6}[/bold cyan] "
                         f"[dim]┃ Loss:[/dim] "
                         f"[bold white]{loss_text}[/bold white]"
@@ -2200,23 +2386,17 @@ class Trainer:
                 ):
                     should_stop = True
 
-            for epoch in range(start_epoch, self.training_config.epochs):
+            while not should_stop:
                 if should_stop:
                     break
 
                 epoch_updates_run = 0
-                skip_batches = (
-                    resume_step_in_epoch
-                    if epoch == start_epoch
-                    else 0
-                )
+                skip_batches = resume_step_in_epoch
                 dataloader = self._train_dataloader
-                self._set_dataloader_epoch(dataloader, epoch)
                 data_iterator = iter(dataloader)
                 self._active_data_iterator = data_iterator
                 restored_iterator = (
                     resume_checkpoint is not None
-                    and epoch == start_epoch
                     and self._restore_dataloader_state(
                         data_iterator,
                         resume_checkpoint,
@@ -2470,7 +2650,6 @@ class Trainer:
                     )
                     progress.console.print(
                         f"[bold cyan]Evaluation[/bold cyan] ┃ "
-                        f"[bold cyan]Epoch {epoch:<3}[/bold cyan] "
                         f"[dim]┃ Loss:[/dim] "
                         f"[bold white]{metrics['eval_loss']:.4f}"
                         f"[/bold white]"
@@ -2492,6 +2671,19 @@ class Trainer:
                         )
                 resume_step_in_epoch = 0
 
+                # With no max_steps the dataloader is consumed once; otherwise
+                # cycle it (the dataloader owns its own shuffling) until
+                # max_steps is reached.
+                if self.training_config.max_steps is None:
+                    break
+                if epoch_updates_run == 0:
+                    # The dataloader yielded nothing this pass (e.g. a
+                    # one-shot iterator that can no longer be re-iterated).
+                    break
+                if should_stop:
+                    # max_steps was reached on this pass; do not start another.
+                    break
+
             if microbatches_run_this_call == 0 and step == 0:
                 raise ValueError('dataloader produced no training batches')
 
@@ -2508,7 +2700,6 @@ class Trainer:
                 smoothed_loss = moving_average_loss()
                 self.log_history.append({
                     'step': step,
-                    'epoch': epoch,
                     'loss': smoothed_loss,
                     'seconds_per_step': seconds_per_step,
                     'learning_rate': learning_rate,
@@ -2531,7 +2722,6 @@ class Trainer:
                     else ''
                 )
                 progress.console.print(
-                    f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
                     f"[bold cyan]Step {step:<6}[/bold cyan] "
                     f"[dim]┃ Loss:[/dim] "
                     f"[bold white]{loss_text}[/bold white]"

@@ -171,3 +171,11 @@ def test_from_datasets_validates_configuration(kwargs):
 
     with pytest.raises((TypeError, ValueError)):
         DatasetUtils.from_datasets(source, **kwargs)
+
+
+def test_from_datasets_defaults_to_single_epoch():
+    import inspect
+
+    sig = inspect.signature(DatasetUtils.from_datasets)
+
+    assert sig.parameters['num_epochs'].default == 1

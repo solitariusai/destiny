@@ -24,7 +24,6 @@ from taktiny.utils.typing import Batch, PathLike, PyTree
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    epochs: int = 1
     max_steps: int | None = None
     learning_rate: float = 1e-3
     schedule: Callable[[Any], Any] | None = None
@@ -50,14 +49,12 @@ class TrainingConfig:
     max_grad_norm: float | None = None
     compute_grad_norm: bool = True
     skip_non_finite: bool = True
+    ema_decay: float | None = None
     loss_scale: float | str | None = None
     initial_loss_scale: float = 32768.0
     loss_scale_growth_interval: int = 2000
 
     def __post_init__(self) -> None:
-        if self.epochs < 1:
-            raise ValueError('epochs should be a positive integer')
-
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError('seed should be an integer')
 
@@ -137,6 +134,13 @@ class TrainingConfig:
 
         if not isinstance(self.compute_grad_norm, bool):
             raise TypeError('compute_grad_norm should be a boolean')
+
+        if self.ema_decay is not None and not (
+            0.0 < self.ema_decay < 1.0
+        ):
+            raise ValueError(
+                'ema_decay must be None or in (0, 1)'
+            )
 
         if (
             self.load_best_model_at_end
