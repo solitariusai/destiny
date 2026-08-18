@@ -70,28 +70,12 @@ def cross_entropy_loss(
 
     safe_labels = jnp.where(selected, labels, 0)
 
-    # Compute loss sequentially over the batch dimension to save HBM
-    # since log_softmax on [18, 512, 82369] takes 12GB of temporaries.
-    # We MUST use scan with a data-dependent carry to force XLA to schedule
-    # the backward passes sequentially, avoiding a 50GB parallel memory spike.
-    def _compute_loss_step(carry, inputs):
-        l_batch, label_batch, sel_batch = inputs
-        log_probs = jax.nn.log_softmax(l_batch.astype(jnp.float32), axis=-1)
-        loss = -jnp.take_along_axis(
-            log_probs,
-            label_batch[..., None],
-            axis=-1,
-        )[..., 0]
-        loss = jnp.where(sel_batch, loss, 0.0)
-        # Force strict data dependency to prevent parallelization
-        return carry, loss
-
-    # Use scan to prevent parallel execution of massive intermediate buffers
-    _, losses = jax.lax.scan(
-        _compute_loss_step,
-        jnp.zeros((), dtype=jnp.float32), # Dummy carry to force sequentiality
-        (logits, safe_labels, selected)
+    import optax
+    losses = optax.softmax_cross_entropy_with_integer_labels(
+        logits.astype(jnp.float32),
+        safe_labels,
     )
+    losses = jnp.where(selected, losses, 0.0)
 
     if reduction == 'none':
         return losses
