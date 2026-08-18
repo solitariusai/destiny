@@ -329,59 +329,6 @@ For gated repositories, `HF_TOKEN` takes precedence over `hf_token`. Repository
 loading, token resolution, preprocessing, and Grain wrapping are all skipped
 when `dataloader` is supplied explicitly.
 
-### Supervised Fine-Tuning
-
-`SFTTrainer` specializes the same training loop with causal language-model
-loss, tokenization, dynamic padding, and optional sequence packing:
-
-```python
-from transformers import AutoTokenizer
-
-from taktiny import SFTDatasetConfig, SFTTrainer, SFTTrainingConfig
-
-tokenizer = AutoTokenizer.from_pretrained(model_repo)
-if tokenizer.pad_token_id is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-trainer = SFTTrainer(
-    model,
-    training_config=SFTTrainingConfig(
-        epochs=1,
-        learning_rate=2e-4,
-        assistant_only_loss=True,
-        jit_compile=True,
-    ),
-    dataset_config=SFTDatasetConfig(
-        repo_id='open-r1/OpenThoughts-114k-math',
-        tokenizer=tokenizer,
-        process_fn=prepare_open_thoughts,
-        batch_size=8,
-        max_length=1024,
-        padding='longest',
-        packing=False,
-    ),
-)
-trainer.train()
-```
-
-Supported records contain one of:
-
-- `input_ids`, with optional `labels` and `attention_mask`
-- `text`
-- `messages`
-- `prompt` and `completion`
-
-Prompt-completion records use completion-only loss by default. Conversational
-records can use `assistant_only_loss=True`; explicit pretokenized `labels`
-always take precedence. Set `packing=True` to fill fixed-length sequences.
-Packed examples receive block-diagonal attention masks, so examples in the same
-sequence cannot attend to each other.
-
-`process_fn` runs once on a dataset loaded through `repo_id`. Use
-`formatting_fn` for per-record conversion. Set `skip_prepare_dataset=True` only
-when the supplied dataloader already yields complete SFT batches containing
-`input_ids`, `attention_mask`, and `labels`.
-
 Rematerialization is configured on models that understand their own layer
 boundaries:
 
