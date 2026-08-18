@@ -1955,13 +1955,24 @@ class Trainer:
                     is_leaf=lambda value: value is None,
                 )
                 averaged_loss = accumulated_loss / divisor
-                # optax.tree.norm materializes a full squared copy of the
-                # gradient tree; the vdot reduction below never does.
-                current_grad_norm = _global_grad_norm(averaged_grads)
-                finite = (
-                    jnp.isfinite(averaged_loss)
-                    & jnp.isfinite(current_grad_norm)
+                # The grad norm is only computed when it is needed: to clip
+                # with max_grad_norm, or to track/report it. Computing it reads
+                # every gradient leaf and keeps the averaged tree alive while
+                # the reduction runs, so disabling it saves that pass entirely
+                # (a further ~2.7% of the gradient tree).
+                track_grad_norm = (
+                    self.training_config.compute_grad_norm
+                    or self.training_config.max_grad_norm is not None
                 )
+                if track_grad_norm:
+                    current_grad_norm = _global_grad_norm(averaged_grads)
+                    finite = (
+                        jnp.isfinite(averaged_loss)
+                        & jnp.isfinite(current_grad_norm)
+                    )
+                else:
+                    current_grad_norm = None
+                    finite = jnp.isfinite(averaged_loss)
 
                 if self.training_config.max_grad_norm is not None:
                     clip_scale = jnp.minimum(
@@ -1985,7 +1996,11 @@ class Trainer:
                     (averaged_loss, current_grad_norm, finite)
                 )
                 loss_value = float(loss_value)
-                grad_norm_value = float(grad_norm_value)
+                grad_norm_value = (
+                    None
+                    if grad_norm_value is None
+                    else float(grad_norm_value)
+                )
                 finite_value = bool(finite_value)
                 update_skipped = (
                     not finite_value
@@ -2040,7 +2055,10 @@ class Trainer:
                 step += 1
                 self.global_step = step
                 self.last_grad_norm = (
-                    grad_norm_value if math.isfinite(grad_norm_value) else None
+                    grad_norm_value
+                    if grad_norm_value is not None
+                    and math.isfinite(grad_norm_value)
+                    else None
                 )
                 self.last_update_skipped = update_skipped
                 loss = loss_value if math.isfinite(loss_value) else None

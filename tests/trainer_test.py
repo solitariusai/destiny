@@ -1990,3 +1990,64 @@ def test_global_grad_norm_handles_mixed_dtypes_and_zero_leaves():
 
 def test_global_grad_norm_of_empty_tree_is_zero():
     assert float(_global_grad_norm({})) == 0.0
+
+
+def test_trainer_can_skip_grad_norm_tracking():
+    model = TinyModel()
+    batches = [
+        {
+            'x': np.asarray([1.0], dtype=np.float32),
+            'y': np.asarray([2.0], dtype=np.float32),
+        },
+        {
+            'x': np.asarray([3.0], dtype=np.float32),
+            'y': np.asarray([1.0], dtype=np.float32),
+        },
+    ]
+    trainer = Trainer(
+        model,
+        TrainingConfig(
+            max_steps=2,
+            learning_rate=0.1,
+            log_interval=1,
+            compute_grad_norm=False,
+        ),
+        DatasetConfig(batches, prefetch_size=2),
+        loss_fn=squared_error,
+    )
+
+    trainer.train()
+
+    assert float(model.weight.value) != 0.0
+    assert float(model.frozen.value) == 3.0
+    assert all(
+        record.get('grad_norm') is None
+        for record in trainer.log_history
+    )
+
+
+def test_grad_norm_still_computed_when_clipping_enabled():
+    model = TinyModel()
+    batches = [
+        {
+            'x': np.asarray([1.0], dtype=np.float32),
+            'y': np.asarray([2.0], dtype=np.float32),
+        }
+    ]
+    trainer = Trainer(
+        model,
+        TrainingConfig(
+            max_steps=1,
+            learning_rate=0.1,
+            log_interval=1,
+            max_grad_norm=1.0,
+            compute_grad_norm=False,
+        ),
+        DatasetConfig(batches, prefetch_size=1),
+        loss_fn=squared_error,
+    )
+
+    trainer.train()
+
+    assert trainer.log_history[-1].get('grad_norm') is not None
+    assert float(model.weight.value) != 0.0

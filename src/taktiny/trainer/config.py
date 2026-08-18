@@ -48,6 +48,7 @@ class TrainingConfig:
     load_best_model_at_end: bool = False
     gradient_accumulation_steps: int = 1
     max_grad_norm: float | None = None
+    compute_grad_norm: bool = True
     skip_non_finite: bool = True
     loss_scale: float | str | None = None
     initial_loss_scale: float = 32768.0
@@ -133,6 +134,9 @@ class TrainingConfig:
 
         if not isinstance(self.load_best_model_at_end, bool):
             raise TypeError('load_best_model_at_end should be a boolean')
+
+        if not isinstance(self.compute_grad_norm, bool):
+            raise TypeError('compute_grad_norm should be a boolean')
 
         if (
             self.load_best_model_at_end
