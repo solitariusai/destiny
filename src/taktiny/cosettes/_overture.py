@@ -1290,7 +1290,8 @@ class PretrainedModel(nn.Module):
                                         target_var.trainable = False
                                         stacked_state = {
                                             'kind': 'quantized',
-                                            'layers': {},
+                                            'value': None,
+                                            'indices': set(),
                                             'rule': rule,
                                             'quantization_kind': (
                                                 quantization_kind
@@ -1298,11 +1299,7 @@ class PretrainedModel(nn.Module):
                                         }
                                     stacked_states[k_stacked] = stacked_state
 
-                                loaded_indices = (
-                                    stacked_state['indices']
-                                    if stacked_state['kind'] == 'dense'
-                                    else stacked_state['layers']
-                                )
+                                loaded_indices = stacked_state['indices']
                                 if idx in loaded_indices:
                                     raise ValueError(
                                         'Checkpoint contains duplicate layer '
@@ -1345,7 +1342,27 @@ class PretrainedModel(nn.Module):
                                                 layer_parameter,
                                                 stacked_state['rule'],
                                             )
-                                    stacked_state['layers'][idx] = layer_value
+
+                                    if stacked_state['value'] is None:
+                                        def make_stacked_zero(arr: tp.Any) -> tp.Any:
+                                            if arr is None:
+                                                return None
+                                            stacked_shape = (target_var.shape[0],) + arr.shape
+                                            return jnp.zeros(stacked_shape, dtype=arr.dtype)
+
+                                        stacked_state['value'] = jax.tree.map(make_stacked_zero, layer_value)
+
+                                    stacked_state['value'] = jax.tree.map(
+                                        lambda s, l: update_stacked_parameter(
+                                            s,
+                                            l,
+                                            jnp.asarray(idx, dtype=jnp.int32),
+                                        ) if (s is not None and l is not None) else None,
+                                        stacked_state['value'],
+                                        layer_value,
+                                    )
+                                    stacked_state['indices'].add(idx)
+                                    continue
                                 else:
                                     target_dtype = np.dtype(target_var.dtype)
                                     if value.dtype != target_dtype:
@@ -1388,11 +1405,7 @@ class PretrainedModel(nn.Module):
         for k_stacked, stacked_state in stacked_states.items():
             target_var = current_state_dict[k_stacked]
             expected_indices = set(range(target_var.shape[0]))
-            loaded_indices = (
-                stacked_state['indices']
-                if stacked_state['kind'] == 'dense'
-                else set(stacked_state['layers'])
-            )
+            loaded_indices = stacked_state['indices']
             if loaded_indices != expected_indices:
                 missing = sorted(expected_indices - loaded_indices)
                 raise ValueError(
@@ -1402,20 +1415,11 @@ class PretrainedModel(nn.Module):
 
             if stacked_state['kind'] == 'dense':
                 new_state[k_stacked] = stacked_state['value']
-                continue
-
-            ordered_layers = [
-                stacked_state['layers'][index]
-                for index in range(target_var.shape[0])
-            ]
-            stacked_array = jax.tree.map(
-                lambda *values: jnp.stack(values, axis=0),
-                *ordered_layers,
-            )
-            new_state[k_stacked] = place_qarray(
-                stacked_array,
-                target_var,
-            )
+            else:
+                new_state[k_stacked] = place_qarray(
+                    stacked_state['value'],
+                    target_var,
+                )
 
         if not_found_some:
             print("\nSome modules from the checkpoint were not found in this model.")
