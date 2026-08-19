@@ -2215,10 +2215,15 @@ class TransformerCausalLM(PretrainedModel):
         path_or_repo: PathLike,
         *,
         config: ModelConfig,
-        module_map: tp.List | None,
+        module_map: tp.List | None = None,
         **kwargs: tp.Any,
     ) -> tp.Self:
-        module_map = module_map or []
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
+        module_map = list(module_map or [])
+        if extra_module_map:
+            module_map.extend(extra_module_map)
+
         tied = config.tie_word_embeddings or False
         if tied:
             embedding_target = None
@@ -2255,6 +2260,12 @@ class TransformerCausalLM(PretrainedModel):
         module_map: tp.List | None = None,
         **kwargs,
     ) -> tp.Self:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
+        module_map = list(module_map or [])
+        if extra_module_map:
+            module_map.extend(extra_module_map)
+
         # Load config
         if 'config' in kwargs:
             config = kwargs.pop('config')
@@ -2266,7 +2277,6 @@ class TransformerCausalLM(PretrainedModel):
             )
 
         # Define how HuggingFace weights map to components using new Tuple format
-        module_map = module_map or []
         module_map.extend([
             ("model.embed_tokens.weight", "model.embed_tokens.embedding"),
         ])
@@ -2280,7 +2290,7 @@ class TransformerCausalLM(PretrainedModel):
             local=local,
             mesh=mesh,
             sharding_rules=sharding_rules,
-            **kwargs
+            **kwargs,
         )
 
     def _sample(
@@ -3187,6 +3197,8 @@ class TransformerMultimodalLM(PretrainedModel):
         module_map: tp.List | None = None,
         **kwargs: tp.Any,
     ) -> tp.Any:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -3208,6 +3220,8 @@ class TransformerMultimodalLM(PretrainedModel):
 
         if module_map is not None:
             rules.extend(module_map)
+        if extra_module_map is not None:
+            rules.extend(extra_module_map)
 
         return super().from_pretrained(
             path_or_repo,

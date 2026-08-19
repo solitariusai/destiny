@@ -56,8 +56,11 @@ class Gemma(TransformerCausalLM):
         mesh: Any=None,
         sharding_rules: Any=None,
         local: bool=False,
+        module_map: Any = None,
         **kwargs: Any
     ) -> Any:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -67,12 +70,16 @@ class Gemma(TransformerCausalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
+        rules = list(module_map or [])
+        if extra_module_map:
+            rules.extend(extra_module_map)
         return super().from_pretrained(
             path_or_repo,
             mesh=mesh,
             sharding_rules=sharding_rules,
             local=local,
             config=config,
+            module_map=rules if rules else None,
             **kwargs,
         )
 
@@ -181,8 +188,11 @@ class Gemma3(TransformerCausalLM):
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
         local: bool = False,
+        module_map: Any = None,
         **kwargs: tp.Any,
     ) -> tp.Self:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -192,12 +202,16 @@ class Gemma3(TransformerCausalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
+        rules = list(module_map or [])
+        if extra_module_map:
+            rules.extend(extra_module_map)
         return super().from_pretrained(
             path_or_repo,
             mesh=mesh,
             sharding_rules=sharding_rules,
             local=local,
             config=config,
+            module_map=rules if rules else None,
             **kwargs,
         )
 
