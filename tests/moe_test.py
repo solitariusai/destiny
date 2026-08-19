@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 from taktiny import nn
-from taktiny.layers.ffn import MoeFFN
+from taktiny.cosettes.layers.ffn import MoeFFN
 
 def test_moe():
     rngs = jax.random.PRNGKey(0)

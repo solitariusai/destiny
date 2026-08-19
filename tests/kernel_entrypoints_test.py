@@ -4,22 +4,22 @@ import numpy as np
 import pytest
 
 from taktiny import nn
-from taktiny.kernels.attention.flash_attention import (
+from taktiny.cosettes.kernels.attention.flash_attention import (
     flash_attention_block_masked,
 )
-from taktiny.kernels.attention.tokamax_splash import (
-    ring_attention_kernel,
+from taktiny.cosettes.kernels.attention.tokamax_splash import ring_attention_kernel
+from taktiny.cosettes.kernels.attention.tokamax_splash import (
     splash_attention_mask,
 )
 from taktiny.kernels.ragged import ragged_gather
-from taktiny.kernels.ragged.ragged_gather_reduce import (
+from taktiny.cosettes.kernels.ragged.ragged_gather_reduce import (
     ragged_gather_reduce as ragged_gather_reduce_v1,
 )
-from taktiny.kernels.ragged.ragged_gather_reduce_v2 import (
+from taktiny.cosettes.kernels.ragged.ragged_gather_reduce_v2 import (
     ragged_gather_reduce as ragged_gather_reduce_v2,
 )
-from taktiny.layers.attention import Attention
-from taktiny.layers.ffn import FusedGateMLP, MoeFFN
+from taktiny.cosettes.layers.attention import Attention
+from taktiny.cosettes.layers.ffn import FusedGateMLP, MoeFFN
 
 
 def _qkv(*, query_heads=4, key_heads=2, query_length=4, key_length=4):

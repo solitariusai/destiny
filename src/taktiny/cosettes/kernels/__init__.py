@@ -13,15 +13,15 @@
 # limitations under the License.
 """High-performance kernels for TakTiny (Attention, Megablox GMM, Ragged, Gather-Reduce)."""
 
-from taktiny.kernels import attention
-from taktiny.kernels import megablox
-from taktiny.kernels import ragged
-from taktiny.kernels import gather_reduce_pallas
-from taktiny.kernels import gather_reduce_sc
-from taktiny.kernels import sort_activations
+from taktiny.cosettes.kernels import attention
+from taktiny.cosettes.kernels import megablox
+from taktiny.cosettes.kernels import ragged
+from taktiny.cosettes.kernels import gather_reduce_pallas
+from taktiny.cosettes.kernels import gather_reduce_sc
+from taktiny.cosettes.kernels import sort_activations
 
-from taktiny.kernels.sort_activations import route, unroute
-from taktiny.kernels.gather_reduce_sc import sc_gather_reduce
+from taktiny.cosettes.kernels.sort_activations import route, unroute
+from taktiny.cosettes.kernels.gather_reduce_sc import sc_gather_reduce
 
 __all__ = [
     "attention",

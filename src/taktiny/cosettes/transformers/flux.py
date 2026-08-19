@@ -21,7 +21,7 @@ import typing as tp
 import jax
 import jax.numpy as jnp
 
-from taktiny import layers as ly
+from taktiny.cosettes import layers as ly
 from taktiny import nn
 from taktiny.cosettes._continuo import (
     _config_value,

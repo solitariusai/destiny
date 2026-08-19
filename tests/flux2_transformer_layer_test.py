@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from taktiny import layers as ly
+from taktiny.cosettes import layers as ly
 from taktiny import nn
 from taktiny.cosettes.transformers.flux import (
     Flux2Modulation,

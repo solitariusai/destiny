@@ -18,7 +18,7 @@ from typing import Any
 
 from taktiny import nn
 from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
-from taktiny.layers import GateMLP, Attention
+from taktiny.cosettes.layers import GateMLP, Attention
 
 
 class LlamaDecoderLayer(TransformerDecoderLayer):

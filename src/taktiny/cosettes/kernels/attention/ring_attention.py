@@ -29,9 +29,9 @@ from jax.experimental import pallas as pl
 import numpy as np
 
 MODEL_MODE_TRAIN = "train"
-from taktiny.kernels.attention.tokamax_splash import ring_attention_kernel
-from taktiny.kernels.attention.tokamax_splash import splash_attention_kernel as tokamax_splash_kernel
-from taktiny.kernels.attention.tokamax_splash import splash_attention_mask as tokamax_splash_mask
+from taktiny.cosettes.kernels.attention.tokamax_splash import ring_attention_kernel
+from taktiny.cosettes.kernels.attention.tokamax_splash import splash_attention_kernel as tokamax_splash_kernel
+from taktiny.cosettes.kernels.attention.tokamax_splash import splash_attention_mask as tokamax_splash_mask
 
 def reorder_mask_load_balancing(tensor: Any, cp_size: int, seq_dim: int) -> Any:
     seq_len = tensor.shape[seq_dim]

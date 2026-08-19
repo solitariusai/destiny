@@ -21,8 +21,8 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from taktiny.kernels.ragged.ragged_gather import ragged_gather
-from taktiny.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
+from taktiny.cosettes.kernels.ragged.ragged_gather import ragged_gather
+from taktiny.cosettes.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 
 
 def ring_ragged_sort(

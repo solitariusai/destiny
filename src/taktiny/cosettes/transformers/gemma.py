@@ -24,7 +24,7 @@ from jax.nn.initializers import normal
 from taktiny import nn
 from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
 from taktiny.maestro.config import ModelConfig
-from taktiny.layers import Attention, GateMLP, RotaryEmbedding
+from taktiny.cosettes.layers import Attention, GateMLP, RotaryEmbedding
 from taktiny.utils.typing import AxisNames, Initializer, ShardMode
 
 
@@ -319,7 +319,7 @@ class Gemma4DecoderLayer(TransformerDecoderLayer):
             'post_feedforward_layernorm_1': Gemma3RMSNorm,
         }
         if enable_moe:
-            from taktiny.layers.ffn import MoeFFN
+            from taktiny.cosettes.layers.ffn import MoeFFN
             modules.update({
                 'pre_feedforward_layernorm_2': Gemma3RMSNorm,
                 'experts': MoeFFN,

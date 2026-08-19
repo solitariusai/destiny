@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from taktiny.layers import Attention
+from taktiny.cosettes.layers import Attention
 
 
 pytestmark = [

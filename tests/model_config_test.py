@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from taktiny import nn
-from taktiny.layers import RotaryEmbedding
+from taktiny.cosettes.layers import RotaryEmbedding
 from taktiny.maestro.config import ModelConfig
 from taktiny.maestro.opus.gemma import Gemma2, Gemma3
 from taktiny.maestro.opus.llama import Llama

@@ -35,7 +35,7 @@ from taktiny.cosettes._continuo import (
     _stage_values,
 )
 from taktiny.cosettes.autoencoders._ordinario import Autoencoder
-from taktiny.layers import GLUMBConv
+from taktiny.cosettes.layers import GLUMBConv
 from taktiny.maestro.config import ModelConfig
 from taktiny.nn._continuo import _constrain, _resolve_activation
 from taktiny.utils.typing import DType, ShardMode

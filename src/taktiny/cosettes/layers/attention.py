@@ -431,7 +431,7 @@ class Attention(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply FlashAttention block masked kernel on Q, K, V."""
-        from taktiny.kernels.attention.flash_attention import flash_attention_block_masked
+        from taktiny.cosettes.kernels.attention.flash_attention import flash_attention_block_masked
         (
             batch_size,
             query_length,
@@ -495,7 +495,7 @@ class Attention(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply the decode-only Ragged Attention kernel."""
-        from taktiny.kernels.attention.ragged_attention import (
+        from taktiny.cosettes.kernels.attention.ragged_attention import (
             ragged_gqa,
             ragged_mha,
         )
@@ -558,7 +558,7 @@ class Attention(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply the Splash Attention reference with dense masks."""
-        from taktiny.kernels.attention.splash_attention import attention_reference
+        from taktiny.cosettes.kernels.attention.splash_attention import attention_reference
 
         (
             batch_size,
@@ -653,7 +653,7 @@ class Attention(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply a prebuilt Ring Splash Attention kernel."""
-        from taktiny.kernels.attention.tokamax_splash import ring_attention_kernel
+        from taktiny.cosettes.kernels.attention.tokamax_splash import ring_attention_kernel
 
         (
             batch_size,

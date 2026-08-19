@@ -302,7 +302,7 @@ def multi_axis_position_embedding(
     if axes_dim is None:
         return None
 
-    from taktiny.layers import MultiAxisRotaryEmbedding
+    from taktiny.cosettes.layers import MultiAxisRotaryEmbedding
 
     return MultiAxisRotaryEmbedding(
         axes_dim,

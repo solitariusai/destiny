@@ -24,9 +24,9 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
-from taktiny.layers.attention import Attention, JointAttention
-from taktiny.layers.ffn import FeedForward, GLUMBConv
-from taktiny.layers.normalization import AdaXNorm, NormType
+from taktiny.cosettes.layers.attention import Attention, JointAttention
+from taktiny.cosettes.layers.ffn import FeedForward, GLUMBConv
+from taktiny.cosettes.layers.normalization import AdaXNorm, NormType
 from taktiny.nn._continuo import (
     _constrain,
     _resolve_activation,

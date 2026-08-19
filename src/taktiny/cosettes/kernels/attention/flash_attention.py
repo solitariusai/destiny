@@ -22,7 +22,7 @@ from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from taktiny.kernels.attention import splash_attention as splash_attention_kernel
+from taktiny.cosettes.kernels.attention import splash_attention as splash_attention_kernel
 
 SegmentIds = splash_attention_kernel.SegmentIds
 

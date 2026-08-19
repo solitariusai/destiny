@@ -19,8 +19,8 @@ import typing as tp
 
 from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
 from taktiny import nn
-from taktiny.layers.ffn import MoeFFN
-from taktiny.layers import Attention
+from taktiny.cosettes.layers.ffn import MoeFFN
+from taktiny.cosettes.layers import Attention
 
 class GptOssDecoderLayer(TransformerDecoderLayer):
     def __init__(self, config: tp.Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:

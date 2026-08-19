@@ -10,7 +10,7 @@ import typing as tp
 
 import jax
 
-from taktiny import layers as ly
+from taktiny.cosettes import layers as ly
 from taktiny import nn
 from taktiny.cosettes._continuo import (
     _approximate_gelu,

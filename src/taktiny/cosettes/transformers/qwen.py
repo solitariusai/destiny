@@ -21,8 +21,8 @@ import jax.numpy as jnp
 
 from taktiny import nn
 from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
-from taktiny.layers import Attention, GateMLP, RotaryEmbedding
-from taktiny.layers.positional_embedding import rotate_half
+from taktiny.cosettes.layers import Attention, GateMLP, RotaryEmbedding
+from taktiny.cosettes.layers.positional_embedding import rotate_half
 from taktiny.utils.typing import AxisNames, ShardMode
 
 
