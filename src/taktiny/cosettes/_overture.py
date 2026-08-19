@@ -1228,7 +1228,15 @@ class PretrainedModel(nn.Module):
                                     0,
                                 )
                         if value.shape != target_var.shape:
-                            value = value.reshape(target_var.shape)
+                            try:
+                                value = value.reshape(target_var.shape)
+                            except ValueError as error:
+                                raise ValueError(
+                                    f'Cannot load checkpoint tensor for '
+                                    f'{k_mapped!r}: shape {value.shape} is '
+                                    f'incompatible with parameter shape '
+                                    f'{target_var.shape}'
+                                ) from error
                         new_state[k_mapped] = materialize_parameter(
                             k_mapped,
                             value,
@@ -1268,7 +1276,16 @@ class PretrainedModel(nn.Module):
                                             0,
                                         )
                                 if value.shape != layer_shape:
-                                    value = value.reshape(layer_shape)
+                                    try:
+                                        value = value.reshape(layer_shape)
+                                    except ValueError as error:
+                                        raise ValueError(
+                                            f'Cannot load checkpoint tensor '
+                                            f'for {k_mapped!r}: shape '
+                                            f'{value.shape} is incompatible '
+                                            f'with stacked layer shape '
+                                            f'{layer_shape}'
+                                        ) from error
 
                                 stacked_state = stacked_states.get(k_stacked)
                                 if stacked_state is None:

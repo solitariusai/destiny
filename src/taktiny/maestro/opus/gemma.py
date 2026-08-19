@@ -231,15 +231,24 @@ class Gemma3ConditionalGeneration(TransformerMultimodalLM):
         )
 
 def _split_gemma4_gate_up(tensor: jax.Array) -> tuple[jax.Array, jax.Array]:
-    dim = tensor.shape[-1] // 2
-    w1 = tensor[..., :dim]
-    w3 = tensor[..., dim:]
+    # The checkpoint merges w1 and w3 along the intermediate axis:
+    # (num_experts, 2 * moe_intermediate, hidden). Taktiny stores them as
+    # (num_experts, hidden, moe_intermediate), so split on axis -2 and
+    # transpose the trailing pair.
+    dim = tensor.shape[-2] // 2
+    w1 = tensor[..., :dim, :].transpose(0, 2, 1)
+    w3 = tensor[..., dim:, :].transpose(0, 2, 1)
     return w1, w3
+
+
+def _transpose_expert_weight(tensor: jax.Array) -> jax.Array:
+    # (num_experts, hidden, moe_intermediate) -> (num_experts, moe_intermediate, hidden)
+    return tensor.transpose(0, 2, 1)
 
 
 _GEMMA4_MODULE_MAP = [
     ('experts.gate_up_proj', ['experts.w1', 'experts.w3'], _split_gemma4_gate_up),
-    ('experts.down_proj', 'experts.w2'),
+    ('experts.down_proj', 'experts.w2', _transpose_expert_weight),
     ('router.proj.weight', 'experts.gate.weight'),
 ]
 

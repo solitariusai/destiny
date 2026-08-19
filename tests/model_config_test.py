@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from taktiny import nn
@@ -223,3 +224,23 @@ def test_gemma4_module_map_is_moe_aware():
 
     assert norm_rename not in _gemma4_module_map(moe, None, None)
     assert norm_rename in _gemma4_module_map(plain, None, None)
+
+
+def test_gemma4_expert_weight_layouts():
+    from taktiny.maestro.opus.gemma import (
+        _split_gemma4_gate_up,
+        _transpose_expert_weight,
+    )
+
+    # (E=1, 2I=6, H=4) merged gate+up
+    gate_up = jnp.arange(24).reshape(1, 6, 4)
+
+    w1, w3 = _split_gemma4_gate_up(gate_up)
+
+    assert w1.shape == (1, 4, 3)
+    assert w3.shape == (1, 4, 3)
+    np.testing.assert_array_equal(w1[0], gate_up[0, :3, :].T)
+    np.testing.assert_array_equal(w3[0], gate_up[0, 3:, :].T)
+
+    down = jnp.arange(12).reshape(1, 4, 3)  # (E, H, I)
+    assert _transpose_expert_weight(down).shape == (1, 3, 4)
