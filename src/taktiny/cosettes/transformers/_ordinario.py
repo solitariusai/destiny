@@ -124,15 +124,19 @@ class TransformerDecoderLayer(nn.Module):
         if not modules:
             raise ValueError('TransformerDecoderLayer requires at least one module')
 
-        shard_mode              = config.shard_mode or ShardMode.AUTO
-        quant                   = config.quant
-        dot_general             = config.dot_general
-        hidden_size             = config.hidden_size
-        num_heads               = config.num_attention_heads
-        num_kv_heads            = config.num_key_value_heads
-        max_position_embeddings = config.max_position_embeddings
-        rope_parameters         = config.rope_parameters
-        intermediate_size       = config.intermediate_size
+        config_text             = getattr(config, 'text_config', None) or config
+        shard_mode              = config_text.shard_mode or ShardMode.AUTO
+        quant                   = config_text.quant
+        dot_general             = config_text.dot_general
+        hidden_size             = config_text.hidden_size
+        num_heads               = config_text.num_attention_heads
+        num_kv_heads            = config_text.num_key_value_heads
+        max_position_embeddings = config_text.max_position_embeddings
+        rope_parameters         = config_text.rope_parameters
+        intermediate_size       = config_text.intermediate_size
+        moe_intermediate_size   = getattr(config_text, 'moe_intermediate_size', None) or intermediate_size
+        num_experts             = getattr(config_text, 'num_experts', None) or 1
+        num_experts_per_tok     = getattr(config_text, 'top_k_experts', None) or getattr(config_text, 'num_experts_per_tok', None) or 1
 
         if isinstance(rope_parameters, dict):
             rope_theta_param = rope_parameters.get('rope_theta', None)
@@ -142,7 +146,7 @@ class TransformerDecoderLayer(nn.Module):
             rope_theta_param = None
 
         rope_theta = (
-            getattr(config, 'rope_theta', None)
+            getattr(config_text, 'rope_theta', None)
             or rope_theta_param
             or 10000.0
         )
@@ -162,33 +166,33 @@ class TransformerDecoderLayer(nn.Module):
             )
 
         dtype = (
-            getattr(config, 'torch_dtype', None)
-            or getattr(config, 'dtype', None)
+            getattr(config_text, 'torch_dtype', None)
+            or getattr(config_text, 'dtype', None)
             or 'bfloat16'
         )
-        head_dim        = config.head_dim or hidden_size // num_heads
-        mlp_bias        = config.mlp_bias or False
-        attention_bias  = config.attention_bias or False
-        eps             = config.rms_norm_eps or 1e-6
-        rope_scaling    = config.rope_scaling
-        sliding_window  = config.sliding_window or config.use_sliding_window
-        layer_types     = config.layer_types
+        head_dim        = config_text.head_dim or hidden_size // num_heads
+        mlp_bias        = config_text.mlp_bias or False
+        attention_bias  = config_text.attention_bias or False
+        eps             = config_text.rms_norm_eps or 1e-6
+        rope_scaling    = config_text.rope_scaling
+        sliding_window  = config_text.sliding_window or config_text.use_sliding_window
+        layer_types     = config_text.layer_types
         if layer_idx is not None and layer_types is not None:
             layer_type = layer_types[layer_idx]
             if layer_type in ('full_attention', 'full'):
                 sliding_window  = None
 
-        hidden_act = config.hidden_act or config.hidden_activation or config.act or 'silu'
+        hidden_act = config_text.hidden_act or config_text.hidden_activation or config_text.act or 'silu'
         if hidden_act in ('gelu_pytorch_tanh', 'gelu_new', 'gelu_fast'):
             hidden_act          = _approximate_gelu
         attention_scaling       = None
-        query_pre_attn_scalar   = config.query_pre_attn_scalar
+        query_pre_attn_scalar   = config_text.query_pre_attn_scalar
         if query_pre_attn_scalar is not None:
             attention_scaling   = query_pre_attn_scalar ** -0.5
-        attention_softcap       = config.attn_logit_softcapping
-        attention_dropout       = config.attention_dropout or  0.0
+        attention_softcap       = config_text.attn_logit_softcapping
+        attention_dropout       = config_text.attention_dropout or  0.0
 
-        if hidden_size % num_heads != 0 and config.head_dim is None:
+        if hidden_size % num_heads != 0 and config_text.head_dim is None:
             raise ValueError(
                 'hidden_size should be divisible by num_attention_heads when '
                 'head_dim is not configured'
@@ -222,6 +226,9 @@ class TransformerDecoderLayer(nn.Module):
                 module_type=module_type,
                 hidden_size=hidden_size,
                 intermediate_size=intermediate_size,
+                moe_intermediate_size=moe_intermediate_size,
+                num_experts=num_experts,
+                num_experts_per_tok=num_experts_per_tok,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
@@ -256,6 +263,9 @@ class TransformerDecoderLayer(nn.Module):
         module_type: nn.Module | type[nn.Module],
         hidden_size: int,
         intermediate_size: int,
+        moe_intermediate_size: int = 0,
+        num_experts: int = 1,
+        num_experts_per_tok: int = 1,
         num_heads: int,
         num_kv_heads: int,
         head_dim: int,
@@ -342,16 +352,41 @@ class TransformerDecoderLayer(nn.Module):
                 quant=quant,
                 dot_general=dot_general,
             )
-        else:
-            raise TypeError(
-                f'Unsupported decoder module {name}: {module_type.__name__}'
+        elif issubclass(module_type, FeedForward):
+            module = module_type(
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                activation=hidden_act,
+                bias=mlp_bias,
+                dtype=dtype,
+                rngs=rngs,
+                shard_mode=shard_mode,
             )
+        else:
+            from taktiny.layers.ffn import MoeFFN
+            if issubclass(module_type, MoeFFN):
+                module = module_type(
+                    hidden_size=hidden_size,
+                    intermediate_size=moe_intermediate_size or intermediate_size,
+                    num_experts=num_experts,
+                    num_experts_per_tok=num_experts_per_tok,
+                    activation=hidden_act,
+                    bias=mlp_bias,
+                    dtype=dtype,
+                    rngs=rngs,
+                    shard_mode=shard_mode,
+                )
+            else:
+                raise TypeError(
+                    f'Unsupported decoder module {name}: {module_type.__name__}'
+                )
 
+        from taktiny.layers.ffn import MoeFFN
         if issubclass(module_type, (nn.RMSNorm, nn.LayerNorm)):
             kind = 'norm'
         elif issubclass(module_type, Attention):
             kind = 'attention'
-        elif issubclass(module_type, GateMLP):
+        elif issubclass(module_type, (GateMLP, FeedForward, MoeFFN)):
             kind = 'residual'
         else:
             raise TypeError(
@@ -417,6 +452,8 @@ class TransformerDecoderLayer(nn.Module):
                 continue
 
             if pending is not None:
+                if hasattr(self, 'layer_scalar') and getattr(self, 'layer_scalar') is not None:
+                    pending = pending * self.layer_scalar.value.astype(pending.dtype)
                 x = residual + pending
                 residual = x
                 pending = None
@@ -435,6 +472,8 @@ class TransformerDecoderLayer(nn.Module):
                 pending = module(x, out_sharding=out_sharding)
 
         if pending is not None:
+            if hasattr(self, 'layer_scalar') and getattr(self, 'layer_scalar') is not None:
+                pending = pending * self.layer_scalar.value.astype(pending.dtype)
             x = residual + pending
 
         return x, new_cache
