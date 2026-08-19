@@ -16,7 +16,7 @@ from __future__ import annotations
 from taktiny.cosettes.transformers._ordinario import (
     TransformerContext,
     TransformerCausalLM,
-    TransformerConditionalGeneration,
+    TransformerMultimodalLM,
     TransformerDecoderLayer,
     TransformerModel
 )
@@ -37,7 +37,7 @@ from taktiny.cosettes.transformers import (
 __all__ = [
     'TransformerContext',
     'TransformerCausalLM',
-    'TransformerConditionalGeneration',
+    'TransformerMultimodalLM',
     'TransformerDecoderLayer',
     'TransformerModel',
     'LlamaDecoderLayer',
