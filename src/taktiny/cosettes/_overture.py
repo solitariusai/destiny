@@ -861,6 +861,7 @@ class PretrainedModel(nn.Module):
         weights_filename: str = 'model.safetensors',
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
+        allow_unmatched: bool = False,
         **kwargs,
     ) -> tp.Any:
         """
@@ -1420,16 +1421,21 @@ class PretrainedModel(nn.Module):
             print("\nSome modules from the checkpoint were not found in this model.")
             print("You can try to map module names using module_map.")
             print("e.g. module_map = {'target_module': 'name_to_change'}")
-
         missing_parameters = sorted(set(current_state_dict) - set(new_state))
         if missing_parameters:
             preview = ', '.join(missing_parameters[:8])
             if len(missing_parameters) > 8:
                 preview += f', ... ({len(missing_parameters)} total)'
-            raise ValueError(
-                'Checkpoint did not provide values for model parameters: '
-                f'{preview}'
-            )
+            if not allow_unmatched:
+                raise ValueError(
+                    'Checkpoint did not provide values for model parameters: '
+                    f'{preview}'
+                )
+            else:
+                print(
+                    'Warning: Checkpoint did not provide values for model parameters: '
+                    f'{preview}'
+                )
 
         # 6. Inject actual arrays into the PyTree skeleton
         state.load_flat_state_dict(new_state)

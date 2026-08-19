@@ -303,6 +303,40 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
         self.self_attn.pos_emb.base = rope_base
 
 
+class Gemma4DecoderLayer(Gemma3DecoderLayer):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
+        self.config = config
+        super().__init__(config=config, rngs=rngs, layer_idx=layer_idx)
+
+    def _create_module(
+        self,
+        *,
+        name: str,
+        module_type: type[nn.Module] | nn.Module,
+        **kwargs
+    ) -> tuple[nn.Module, str]:
+        text_config = getattr(self.config, 'text_config', self.config)
+        enable_moe = getattr(text_config, 'enable_moe_block', False)
+        
+        if name == 'mlp' and enable_moe:
+            from taktiny.layers.ffn import MoeFFN
+            module = MoeFFN(
+                hidden_size=kwargs['hidden_size'],
+                intermediate_size=getattr(text_config, 'moe_intermediate_size', kwargs['intermediate_size']),
+                num_experts=getattr(text_config, 'num_experts', 1),
+                num_experts_per_tok=getattr(text_config, 'top_k_experts', 1),
+                activation=kwargs['hidden_act'],
+                bias=kwargs['mlp_bias'],
+                dtype=kwargs.get('dtype', None),
+                rngs=kwargs['rngs'],
+                shard_mode=kwargs.get('shard_mode', 'auto'),
+            )
+            return module, 'residual'
+            
+        return super()._create_module(name=name, module_type=module_type, **kwargs)
+
+
+
 __all__ = [
     'GemmaTextScaledWordEmbedding',
     'GemmaRMSNorm',
@@ -313,4 +347,5 @@ __all__ = [
     'Gemma3RMSNorm',
     'Gemma3Attention',
     'Gemma3DecoderLayer',
+    'Gemma4DecoderLayer',
 ]

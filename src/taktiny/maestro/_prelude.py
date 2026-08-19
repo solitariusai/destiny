@@ -147,6 +147,7 @@ class Maestro:
         dtype: DType | str | None = None,
         quant: tp.Any = None,
         use_list: bool = False,
+        allow_unmatched: bool = False,
         **kwargs: tp.Any
     ) -> Module:
         """
@@ -215,6 +216,7 @@ class Maestro:
             dtype=dtype,
             quant=quant,
             use_list=use_list,
+            allow_unmatched=allow_unmatched,
             config=config,
             **kwargs
         )

@@ -17,16 +17,15 @@ from __future__ import annotations
 
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes.transformers._ordinario import TransformerCausalLM
-from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
+from taktiny.cosettes.transformers.gpt import GptOssDecoderLayer
 from taktiny import nn
+from taktiny.maestro.config import ModelConfig
 
-
-# TODO: GPTOSS
 class GPTOSS(TransformerCausalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         super().__init__(
             config,
-            decoder=LlamaDecoderLayer,
+            decoder=GptOssDecoderLayer,
             norm=nn.RMSNorm,
             **kwargs,
         )

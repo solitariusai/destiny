@@ -32,6 +32,7 @@ from taktiny.cosettes.transformers.gemma import (
     Gemma3TextScaledWordEmbedding,
     Gemma3RMSNorm,
     Gemma3DecoderLayer,
+    Gemma4DecoderLayer,
 )
 from taktiny import nn
 from taktiny.maestro.config import ModelConfig
@@ -213,7 +214,7 @@ class Gemma4(TransformerConditionalGeneration):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         super().__init__(
             config,
-            decoder=Gemma3DecoderLayer,
+            decoder=Gemma4DecoderLayer,
             norm=nn.RMSNorm,
             **kwargs,
         )
@@ -222,7 +223,7 @@ class Gemma4Unified(TransformerConditionalGeneration):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         super().__init__(
             config,
-            decoder=Gemma3DecoderLayer,
+            decoder=Gemma4DecoderLayer,
             norm=nn.RMSNorm,
             **kwargs,
         )

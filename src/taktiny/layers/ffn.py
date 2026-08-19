@@ -378,6 +378,8 @@ class MoeFFN(nn.Module):
         intermediate_size: int,
         *,
         num_experts: int,
+        num_experts_per_tok: int = 1,
+        activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
         bias: bool = False,
         dtype: str | None = None,
         rngs: nn.Rngs | None = None,
@@ -386,6 +388,50 @@ class MoeFFN(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
+        self.num_experts_per_tok = num_experts_per_tok
+        self.activation = activation
+        
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode)
+        
+        # Expert weights for GMM: [num_experts, in_features, out_features]
+        rng1 = rngs() if rngs is not None else jax.random.PRNGKey(0)
+        rng3 = rngs() if rngs is not None else jax.random.PRNGKey(1)
+        rng2 = rngs() if rngs is not None else jax.random.PRNGKey(2)
+        
+        self.w1 = nn.Parameter(jax.random.normal(rng1, (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w3 = nn.Parameter(jax.random.normal(rng3, (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w2 = nn.Parameter(jax.random.normal(rng2, (num_experts, intermediate_size, hidden_size), dtype=dtype))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        orig_shape = x.shape
+        x_flat = x.reshape(-1, self.hidden_size)
+        
+        # 1. Routing
+        router_logits = self.gate(x_flat)
+        routing_weights = jax.nn.softmax(router_logits, axis=-1)
+        
+        routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.num_experts_per_tok)
+        routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
+        
+        # 2. Sort activations
+        sorted_x, group_sizes = self.apply_route(x_flat, selected_experts, num_groups=self.num_experts)
+        
+        # 3. Apply experts using GMM
+        h1 = self.apply_gmm(sorted_x, self.w1.value, group_sizes)
+        h3 = self.apply_gmm(sorted_x, self.w3.value, group_sizes)
+        h = self.activation(h1) * h3
+        
+        expert_out = self.apply_gmm(h, self.w2.value, group_sizes)
+        
+        # 4. Multiply by routing weights
+        flat_indices = jnp.ravel(selected_experts)
+        sort_inds = jnp.argsort(flat_indices)
+        sorted_weights = jnp.ravel(routing_weights)[sort_inds]
+        expert_out = expert_out * sorted_weights[:, None]
+        
+        # 5. Unroute
+        out_flat = self.apply_unroute(expert_out, selected_experts)
+        return out_flat.reshape(orig_shape)
 
     @classmethod
     def apply_gmm(
