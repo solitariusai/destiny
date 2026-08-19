@@ -303,37 +303,228 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
         self.self_attn.pos_emb.base = rope_base
 
 
-class Gemma4DecoderLayer(Gemma3DecoderLayer):
-    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
+class Gemma4DecoderLayer(nn.Module):
+    """Gemma 4 Decoder Layer with parallel Dense MLP and Sparse MoE branches."""
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None = None) -> None:
         self.config = config
-        super().__init__(config=config, rngs=rngs, layer_idx=layer_idx)
+        text_config = getattr(config, 'text_config', config)
+        self.layer_idx = layer_idx
 
-    def _create_module(
-        self,
-        *,
-        name: str,
-        module_type: type[nn.Module] | nn.Module,
-        **kwargs
-    ) -> tuple[nn.Module, str]:
-        text_config = getattr(self.config, 'text_config', self.config)
-        enable_moe = getattr(text_config, 'enable_moe_block', False)
-        
-        if name == 'mlp' and enable_moe:
-            from taktiny.layers.ffn import MoeFFN
-            module = MoeFFN(
-                hidden_size=kwargs['hidden_size'],
-                intermediate_size=getattr(text_config, 'moe_intermediate_size', None) or kwargs['intermediate_size'],
-                num_experts=getattr(text_config, 'num_experts', None) or 1,
-                num_experts_per_tok=getattr(text_config, 'top_k_experts', None) or 1,
-                activation=kwargs['hidden_act'],
-                bias=kwargs['mlp_bias'],
-                dtype=kwargs.get('dtype', None),
-                rngs=kwargs['rngs'],
-                shard_mode=kwargs.get('shard_mode', 'auto'),
+        dtype = (
+            getattr(text_config, 'torch_dtype', None)
+            or getattr(text_config, 'dtype', None)
+            or 'bfloat16'
+        )
+        shard_mode = getattr(text_config, 'shard_mode', ShardMode.AUTO)
+        quant = getattr(text_config, 'quant', None)
+        dot_general = getattr(text_config, 'dot_general', None)
+        hidden_size = text_config.hidden_size
+        intermediate_size = text_config.intermediate_size
+        moe_intermediate_size = getattr(text_config, 'moe_intermediate_size', None) or intermediate_size
+        num_experts = getattr(text_config, 'num_experts', None) or 1
+        top_k_experts = getattr(text_config, 'top_k_experts', None) or 1
+        enable_moe = bool(getattr(text_config, 'enable_moe_block', False))
+
+        hidden_act = getattr(text_config, 'hidden_act', None) or getattr(text_config, 'hidden_activation', None) or 'silu'
+
+        layer_types = getattr(text_config, 'layer_types', None)
+        if layer_idx is not None and layer_types is not None:
+            layer_type = layer_types[layer_idx]
+        else:
+            layer_type = 'sliding_attention'
+
+        rope_parameters = getattr(text_config, 'rope_parameters', None)
+        if isinstance(rope_parameters, dict):
+            layer_rope_parameters = rope_parameters.get(layer_type, {})
+        elif rope_parameters is not None:
+            layer_rope_parameters = getattr(rope_parameters, layer_type, None)
+        else:
+            layer_rope_parameters = None
+
+        if isinstance(layer_rope_parameters, dict):
+            rope_theta_param = layer_rope_parameters.get('rope_theta', None)
+        else:
+            rope_theta_param = getattr(layer_rope_parameters, 'rope_theta', None)
+
+        if layer_type in ('sliding_attention', 'sliding'):
+            rope_theta = (
+                rope_theta_param
+                or getattr(text_config, 'rope_local_base_freq', None)
+                or 10_000.0
             )
-            return module, 'residual'
-            
-        return super()._create_module(name=name, module_type=module_type, **kwargs)
+            sliding_window = getattr(text_config, 'sliding_window', 1024)
+        else:
+            rope_theta = (
+                rope_theta_param
+                or getattr(text_config, 'rope_theta', None)
+                or 1_000_000.0
+            )
+            sliding_window = None
+
+        # 1. Attention stream
+        self.input_layernorm = Gemma3RMSNorm(
+            hidden_size=hidden_size,
+            eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+            dtype=dtype,
+            shard_mode=shard_mode,
+        )
+        self.self_attn = Gemma3Attention(
+            hidden_size=hidden_size,
+            num_heads=text_config.num_attention_heads,
+            head_dim=text_config.head_dim,
+            num_kv_heads=text_config.num_key_value_heads,
+            pos_emb=RotaryEmbedding(
+                text_config.head_dim,
+                text_config.max_position_embeddings,
+                rope_theta,
+            ),
+            bias=False,
+            q_bias=bool(text_config.attention_bias),
+            k_bias=bool(text_config.attention_bias),
+            v_bias=bool(text_config.attention_bias),
+            o_bias=bool(text_config.attention_bias),
+            dtype=dtype,
+            rngs=rngs,
+            q_axis_names=('embed', 'heads', 'head_dim'),
+            k_axis_names=('embed', 'kv_heads', 'head_dim'),
+            v_axis_names=('embed', 'kv_heads', 'head_dim'),
+            o_axis_names=('heads', 'head_dim', 'embed'),
+            window_size=sliding_window,
+            scaling=(getattr(text_config, 'query_pre_attn_scalar', None) or getattr(text_config, 'head_dim', None) or 256) ** -0.5,
+            softcap=getattr(text_config, 'attn_logit_softcapping', None),
+            dropout=getattr(text_config, 'attention_dropout', None) or 0.0,
+            norm_eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general,
+        )
+        self.post_attention_layernorm = Gemma3RMSNorm(
+            hidden_size=hidden_size,
+            eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+            dtype=dtype,
+            shard_mode=shard_mode,
+        )
+
+        # 2. Branch A: Dense MLP
+        self.pre_feedforward_layernorm = Gemma3RMSNorm(
+            hidden_size=hidden_size,
+            eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+            dtype=dtype,
+            shard_mode=shard_mode,
+        )
+        self.mlp = GateMLP(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            activation=hidden_act,
+            bias=getattr(text_config, 'mlp_bias', False) or False,
+            dtype=dtype,
+            rngs=rngs,
+            gate_axis_names=('embed', 'mlp'),
+            up_axis_names=('embed', 'mlp'),
+            down_axis_names=('mlp', 'embed'),
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general,
+        )
+        self.post_feedforward_layernorm_1 = Gemma3RMSNorm(
+            hidden_size=hidden_size,
+            eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+            dtype=dtype,
+            shard_mode=shard_mode,
+        )
+
+        # 3. Branch B: Sparse MoE Experts
+        self.enable_moe = enable_moe
+        if enable_moe:
+            from taktiny.layers.ffn import MoeFFN
+            self.pre_feedforward_layernorm_2 = Gemma3RMSNorm(
+                hidden_size=hidden_size,
+                eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+                dtype=dtype,
+                shard_mode=shard_mode,
+            )
+            self.experts = MoeFFN(
+                hidden_size=hidden_size,
+                intermediate_size=moe_intermediate_size,
+                num_experts=num_experts,
+                num_experts_per_tok=top_k_experts,
+                activation=hidden_act,
+                bias=getattr(text_config, 'mlp_bias', False) or False,
+                dtype=dtype,
+                rngs=rngs,
+                shard_mode=shard_mode,
+            )
+            self.post_feedforward_layernorm_2 = Gemma3RMSNorm(
+                hidden_size=hidden_size,
+                eps=getattr(text_config, 'rms_norm_eps', None) or 1e-6,
+                dtype=dtype,
+                shard_mode=shard_mode,
+            )
+        else:
+            self.pre_feedforward_layernorm_2 = None
+            self.experts = None
+            self.post_feedforward_layernorm_2 = None
+
+        # 4. Residual LayerScale
+        self.layer_scalar = nn.Parameter(
+            jnp.ones((hidden_size,), dtype=dtype if dtype is not None else jnp.bfloat16)
+        )
+
+        # SeqStack scan leaves
+        window_size = self.self_attn.window_size
+        if window_size is None:
+            window_size = text_config.max_position_embeddings
+        window_size = jnp.asarray(window_size, dtype=jnp.int32)
+        rope_base = jnp.asarray(self.self_attn.pos_emb.base, dtype=jnp.float32)
+
+        self.sliding_window = window_size
+        self.self_attn.window_size = window_size
+        self.self_attn.pos_emb.base = rope_base
+
+    def __call__(
+        self,
+        x: jax.Array,
+        attention_mask: jax.Array | None = None,
+        kv_cache: KVCache | None = None,
+        position_idx: jax.Array | None = None,
+        is_causal: bool = False,
+        out_sharding: jax.sharding.Sharding | None = None,
+        attention_kernel: str = 'dot_product',
+    ) -> tuple[jax.Array, KVCache | None]:
+        # 1. Attention stream
+        h_attn = self.input_layernorm(x, out_sharding=out_sharding)
+        attn_out, new_cache = self.self_attn(
+            h_attn,
+            attention_mask=attention_mask,
+            is_causal=is_causal,
+            kv_cache=kv_cache,
+            position_idx=position_idx,
+            out_sharding=out_sharding,
+            kernel=attention_kernel,
+        )
+        attn_out = self.post_attention_layernorm(attn_out, out_sharding=out_sharding)
+        x = x + attn_out
+
+        # 2. Dense MLP branch
+        h_dense = self.pre_feedforward_layernorm(x, out_sharding=out_sharding)
+        dense_out = self.mlp(h_dense, out_sharding=out_sharding)
+        dense_out = self.post_feedforward_layernorm_1(dense_out, out_sharding=out_sharding)
+
+        # 3. Sparse MoE branch
+        if self.enable_moe and self.experts is not None:
+            h_moe = self.pre_feedforward_layernorm_2(x, out_sharding=out_sharding)
+            moe_out = self.experts(h_moe, out_sharding=out_sharding)
+            moe_out = self.post_feedforward_layernorm_2(moe_out, out_sharding=out_sharding)
+            ffn_out = dense_out + moe_out
+        else:
+            ffn_out = dense_out
+
+        # 4. Residual LayerScale
+        if self.layer_scalar is not None:
+            ffn_out = ffn_out * self.layer_scalar.value.astype(ffn_out.dtype)
+
+        x = x + ffn_out
+        return x, new_cache
 
 
 

@@ -3198,7 +3198,6 @@ class TransformerMultimodalLM(PretrainedModel):
         **kwargs: tp.Any,
     ) -> tp.Any:
         kwargs = dict(kwargs)
-        extra_module_map = kwargs.pop('module_map', None)
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -3220,8 +3219,6 @@ class TransformerMultimodalLM(PretrainedModel):
 
         if module_map is not None:
             rules.extend(module_map)
-        if extra_module_map is not None:
-            rules.extend(extra_module_map)
 
         return super().from_pretrained(
             path_or_repo,

@@ -230,6 +230,22 @@ class Gemma3ConditionalGeneration(TransformerMultimodalLM):
             **kwargs,
         )
 
+def _split_gemma4_gate_up(tensor: jax.Array) -> tuple[jax.Array, jax.Array]:
+    dim = tensor.shape[-1] // 2
+    w1 = tensor[..., :dim]
+    w3 = tensor[..., dim:]
+    return w1, w3
+
+
+_GEMMA4_MODULE_MAP = [
+    ('.experts.gate_up_proj', ['.experts.w1.value', '.experts.w3.value'], _split_gemma4_gate_up),
+    ('.experts.down_proj', '.experts.w2.value'),
+    ('.router.proj.weight', '.experts.gate.weight'),
+    ('.layer_scalar', '.layer_scalar.value'),
+    ('.post_feedforward_layernorm.weight', '.post_feedforward_layernorm_1.weight'),
+]
+
+
 class Gemma4(TransformerCausalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         super().__init__(
@@ -238,6 +254,41 @@ class Gemma4(TransformerCausalLM):
             norm=nn.RMSNorm,
             **kwargs,
         )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo: PathLike,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        local: bool = False,
+        module_map: Any = None,
+        **kwargs: tp.Any,
+    ) -> tp.Self:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
+        if 'config' in kwargs:
+            config = kwargs.pop('config')
+        else:
+            config = ModelConfig.load_config(path_or_repo, local=local)
+        if config is None:
+            raise ValueError(
+                f'Unable to load config from {path_or_repo!r} (local={local})'
+            )
+        config.tie_word_embeddings = True
+        rules = [*_GEMMA4_MODULE_MAP, *(module_map or [])]
+        if extra_module_map:
+            rules.extend(extra_module_map)
+        return super().from_pretrained(
+            path_or_repo,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            local=local,
+            config=config,
+            module_map=rules,
+            **kwargs,
+        )
+
 
 class Gemma4Multimodal(TransformerMultimodalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
@@ -248,6 +299,40 @@ class Gemma4Multimodal(TransformerMultimodalLM):
         super().__init__(
             config,
             language_model=language_model,
+            **kwargs,
+        )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo: PathLike,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        local: bool = False,
+        module_map: Any = None,
+        **kwargs: tp.Any,
+    ) -> tp.Self:
+        kwargs = dict(kwargs)
+        extra_module_map = kwargs.pop('module_map', None)
+        if 'config' in kwargs:
+            config = kwargs.pop('config')
+        else:
+            config = ModelConfig.load_config(path_or_repo, local=local)
+        if config is None:
+            raise ValueError(
+                f'Unable to load config from {path_or_repo!r} (local={local})'
+            )
+        config.tie_word_embeddings = True
+        rules = [*_GEMMA4_MODULE_MAP, *(module_map or [])]
+        if extra_module_map:
+            rules.extend(extra_module_map)
+        return super().from_pretrained(
+            path_or_repo,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            local=local,
+            config=config,
+            module_map=rules,
             **kwargs,
         )
 
