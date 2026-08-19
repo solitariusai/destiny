@@ -375,6 +375,8 @@ class TransformerDecoderLayer(nn.Module):
                     dtype=dtype,
                     rngs=rngs,
                     shard_mode=shard_mode,
+                    quant=quant,
+                    dot_general=dot_general,
                 )
             else:
                 raise TypeError(

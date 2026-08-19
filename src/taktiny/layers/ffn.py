@@ -385,20 +385,39 @@ class MoeFFN(nn.Module):
         dtype: str | None = None,
         rngs: nn.Rngs | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
+        quant: Any = None,
+        dot_general: Any = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok if num_experts_per_tok is not None else 1
         self.activation = _resolve_activation(activation)
+        self.quant = quant
+        self.dot_general = dot_general
+        self.shard_mode = shard_mode
         
-        self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode)
+        self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
         
         # Expert weights for GMM: [num_experts, in_features, out_features]
         rngs = rngs if rngs is not None else nn.Rngs(0)
         self.w1 = nn.Parameter(jax.random.normal(rngs(), (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w1.quantization = quant
+        self.w1.input_axis_count = 1
+        self.w1.quantization_batch_axis_count = 1
+        self.w1.axis_names = ('experts', 'embed', 'mlp')
+
         self.w3 = nn.Parameter(jax.random.normal(rngs(), (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w3.quantization = quant
+        self.w3.input_axis_count = 1
+        self.w3.quantization_batch_axis_count = 1
+        self.w3.axis_names = ('experts', 'embed', 'mlp')
+
         self.w2 = nn.Parameter(jax.random.normal(rngs(), (num_experts, intermediate_size, hidden_size), dtype=dtype))
+        self.w2.quantization = quant
+        self.w2.input_axis_count = 1
+        self.w2.quantization_batch_axis_count = 1
+        self.w2.axis_names = ('experts', 'mlp', 'embed')
 
     def __call__(self, x: jax.Array, out_sharding: Any = None) -> jax.Array:
         orig_shape = x.shape
