@@ -1279,10 +1279,12 @@ class PretrainedModel(nn.Module):
                                         )
                                     )
                                     if rule is None:
+                                        target_dtype = np.dtype(target_var.dtype)
                                         stacked_state = {
                                             'kind': 'dense',
-                                            'value': initialize_stacked_parameter(
-                                                target_var
+                                            'value': np.zeros(
+                                                target_var.shape,
+                                                dtype=target_dtype,
                                             ),
                                             'indices': set(),
                                         }
@@ -1348,16 +1350,16 @@ class PretrainedModel(nn.Module):
                                             if arr is None:
                                                 return None
                                             stacked_shape = (target_var.shape[0],) + arr.shape
-                                            return jnp.zeros(stacked_shape, dtype=arr.dtype)
+                                            return np.zeros(stacked_shape, dtype=np.dtype(arr.dtype))
 
                                         stacked_state['value'] = jax.tree.map(make_stacked_zero, layer_value)
 
-                                    stacked_state['value'] = jax.tree.map(
-                                        lambda s, l: update_stacked_parameter(
-                                            s,
-                                            l,
-                                            jnp.asarray(idx, dtype=jnp.int32),
-                                        ) if (s is not None and l is not None) else None,
+                                    def update_np_slice(s_arr: tp.Any, l_arr: tp.Any) -> None:
+                                        if s_arr is not None and l_arr is not None:
+                                            s_arr[idx] = np.asarray(l_arr)
+
+                                    jax.tree.map(
+                                        update_np_slice,
                                         stacked_state['value'],
                                         layer_value,
                                     )
@@ -1370,31 +1372,7 @@ class PretrainedModel(nn.Module):
                                             target_dtype,
                                             copy=False,
                                         )
-                                    axis_names = getattr(
-                                        target_var,
-                                        'axis_names',
-                                        None,
-                                    )
-                                    layer_axis_names = (
-                                        tuple(axis_names[1:])
-                                        if axis_names is not None
-                                        else None
-                                    )
-                                    layer_value = jax.device_put(
-                                        value,
-                                        parameter_sharding(
-                                            target_var,
-                                            layer_axis_names,
-                                            use_explicit=False,
-                                        ),
-                                    )
-                                    stacked_state['value'] = (
-                                        update_stacked_parameter(
-                                            stacked_state['value'],
-                                            layer_value,
-                                            jnp.asarray(idx, dtype=jnp.int32),
-                                        )
-                                    )
+                                    stacked_state['value'][idx] = np.asarray(value)
                                     stacked_state['indices'].add(idx)
                                 continue
 
@@ -1414,7 +1392,11 @@ class PretrainedModel(nn.Module):
                 )
 
             if stacked_state['kind'] == 'dense':
-                new_state[k_stacked] = stacked_state['value']
+                axis_names = getattr(target_var, 'axis_names', None)
+                new_state[k_stacked] = jax.device_put(
+                    stacked_state['value'],
+                    parameter_sharding(target_var, axis_names),
+                )
             else:
                 new_state[k_stacked] = place_qarray(
                     stacked_state['value'],
