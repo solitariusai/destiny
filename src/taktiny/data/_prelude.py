@@ -22,6 +22,7 @@ from absl import flags
 from absl.flags import UnparsedFlagAccessError
 import grain.python as grain
 from grain._src.core.transforms import FlatMap as _FlatMapTransform
+import numpy as np
 
 
 class Map(grain.MapTransform):
@@ -331,6 +332,137 @@ class DatasetUtils:
             worker_buffer_size=worker_buffer_size,
         )
 
+    @classmethod
+    def from_iterable(
+        cls,
+        source: Iterable[Any],
+        *,
+        operations: Sequence[Any] = (),
+        sampler: grain.Sampler | None = None,
+        shuffle: bool = False,
+        seed: int = 0,
+        num_epochs: int | None = 1,
+        shard_index: int = 0,
+        shard_count: int = 1,
+        worker_count: int | None = 0,
+        worker_buffer_size: int = 1,
+    ) -> grain.DataLoader:
+        """Create a Grain loader from a plain iterable.
+
+        The iterable is materialized into a list (which must fit in memory)
+        and then wrapped by :meth:`from_datasets`. Use this when your data is
+        an arbitrary generator or list rather than a random-access HF dataset.
+        """
+        return cls.from_datasets(
+            list(source),
+            operations=operations,
+            sampler=sampler,
+            shuffle=shuffle,
+            seed=seed,
+            num_epochs=num_epochs,
+            shard_index=shard_index,
+            shard_count=shard_count,
+            worker_count=worker_count,
+            worker_buffer_size=worker_buffer_size,
+        )
+
+
+def train_validation_split(
+    source: Sequence[Any],
+    validation_size: int | float,
+    *,
+    shuffle: bool = True,
+    seed: int = 0,
+) -> tuple[Any, Any]:
+    """Split a random-access source into ``(train, validation)`` views.
+
+    ``validation_size`` may be a count (``int``) or a fraction (``float``
+    in ``(0, 1)``). The returned views are random-access and can be passed
+    directly to :func:`DatasetUtils.from_datasets`.
+    """
+    if not hasattr(source, '__getitem__'):
+        raise TypeError('source must support random access')
+
+    count = len(source)
+    if isinstance(validation_size, bool):
+        raise TypeError('validation_size must be an int or float')
+    if isinstance(validation_size, float):
+        if not 0.0 < validation_size < 1.0:
+            raise ValueError('float validation_size must be in (0, 1)')
+        validation_count = int(round(count * validation_size))
+    elif isinstance(validation_size, int):
+        if not 0 < validation_size < count:
+            raise ValueError(
+                f'int validation_size must be in (0, {count})'
+            )
+        validation_count = validation_size
+    else:
+        raise TypeError('validation_size must be an int or float')
+
+    indices = np.arange(count)
+    if shuffle:
+        indices = np.random.default_rng(seed).permutation(count)
+    train = _IndexedView(source, indices[validation_count:])
+    validation = _IndexedView(source, indices[:validation_count])
+    return train, validation
+
+
+def tokenize(
+    tokenizer: Any,
+    text_field: str,
+    *,
+    max_length: int | None = None,
+    labels: bool = False,
+) -> Map:
+    """A Grain ``MapTransform`` that tokenizes a raw ``text_field`` column.
+
+    Each record is turned into one with ``input_ids`` (and ``labels`` when
+    ``labels=True``), ready for a later pack/batch operation.
+    """
+    if tokenizer is None:
+        raise TypeError('tokenizer is required')
+    if not isinstance(text_field, str) or not text_field:
+        raise TypeError('text_field must be a non-empty string')
+    if (
+        max_length is not None
+        and (isinstance(max_length, bool) or max_length < 1)
+    ):
+        raise ValueError('max_length must be a positive integer or None')
+
+    def tokenize_record(record: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(record, Mapping) or text_field not in record:
+            raise KeyError(
+                f'text_field {text_field!r} not found in record {record!r}'
+            )
+        tokens = tokenizer(
+            record[text_field],
+            return_tensors='np',
+            truncation=True,
+            max_length=max_length,
+        )
+        input_ids = np.asarray(tokens['input_ids'][0], dtype=np.int32)
+        result = dict(record)
+        result['input_ids'] = input_ids
+        if labels:
+            result['labels'] = input_ids.copy()
+        return result
+
+    return Map(tokenize_record)
+
+
+class _IndexedView:
+    """Random-access view over a subset of a source's indices."""
+
+    def __init__(self, source: Sequence[Any], indices: np.ndarray) -> None:
+        self._source = source
+        self._indices = indices
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, index: int) -> Any:
+        return self._source[self._indices[index]]
+
 
 __all__ = [
     'DatasetUtils',
@@ -339,4 +471,6 @@ __all__ = [
     'Filter',
     'IndexMap',
     'RandomMap',
+    'tokenize',
+    'train_validation_split',
 ]
