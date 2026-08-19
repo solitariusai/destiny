@@ -2919,7 +2919,7 @@ class TransformerCausalLM(PretrainedModel):
             yield next_token
 
 
-class TransformerConditionalGeneration(PretrainedModel):
+class TransformerMultimodalLM(PretrainedModel):
     """Unified base class for Multimodal Language Models (Conditional Generation).
 
     Coordinates a text language backbone (e.g., ``TransformerCausalLM``), an optional
@@ -2960,17 +2960,10 @@ class TransformerConditionalGeneration(PretrainedModel):
         *,
         rngs: nn.Rngs | None = None,
         language_model: nn.Module | type[nn.Module] | None = None,
-        decoder: type[nn.Module] | None = None,
-        embedding: nn.Module | type[nn.Module] | None = None,
-        norm: nn.Module | type[nn.Module] | None = None,
-        lm_head: nn.Module | type[nn.Module] | None = None,
         vision_tower: nn.Module | type[nn.Module] | None = None,
         multi_modal_projector: nn.Module | type[nn.Module] | None = None,
         audio_tower: nn.Module | type[nn.Module] | None = None,
         audio_projector: nn.Module | type[nn.Module] | None = None,
-        image_token_id: int | None = None,
-        video_token_id: int | None = None,
-        audio_token_id: int | None = None,
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
         **kwargs: tp.Any,
@@ -2992,30 +2985,20 @@ class TransformerConditionalGeneration(PretrainedModel):
                 self.language_model = language_model(
                     config=config,
                     rngs=rngs,
-                    decoder=decoder,
-                    embedding=embedding,
-                    norm=norm,
-                    lm_head=lm_head,
                     mesh=mesh,
                     sharding_rules=sharding_rules,
                     **kwargs,
                 )
             else:
                 self.language_model = language_model
-        elif decoder is not None:
+        else:
             self.language_model = TransformerCausalLM(
                 config=config,
                 rngs=rngs,
-                decoder=decoder,
-                embedding=embedding,
-                norm=norm,
-                lm_head=lm_head,
                 mesh=mesh,
                 sharding_rules=sharding_rules,
                 **kwargs,
             )
-        else:
-            self.language_model = None
 
         # 2. Vision Encoder / Tower
         if isinstance(vision_tower, type) and issubclass(vision_tower, nn.Module):
@@ -3042,12 +3025,12 @@ class TransformerConditionalGeneration(PretrainedModel):
 
         # 5. Media Token IDs
         self.image_token_id = (
-            image_token_id
+            kwargs.get('image_token_id')
             or getattr(config, 'image_token_id', None)
             or getattr(getattr(config, 'vision_config', None), 'image_token_id', None)
         )
-        self.video_token_id = video_token_id or getattr(config, 'video_token_id', None)
-        self.audio_token_id = audio_token_id or getattr(config, 'audio_token_id', None)
+        self.video_token_id = kwargs.get('video_token_id') or getattr(config, 'video_token_id', None)
+        self.audio_token_id = kwargs.get('audio_token_id') or getattr(config, 'audio_token_id', None)
 
     def get_input_embeddings(self) -> nn.Module | None:
         if self.language_model is not None and hasattr(self.language_model, 'get_input_embeddings'):
@@ -3210,10 +3193,18 @@ class TransformerConditionalGeneration(PretrainedModel):
             ("language_model.model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
         ]
 
-        return cls._load_from_pretrained(
+        if getattr(config, 'tie_word_embeddings', False):
+            module_map.append(
+                ('lm_head.weight', 'language_model.model.embed_tokens.embedding')
+            )
+            module_map.append(
+                ('language_model.lm_head.weight', 'language_model.model.embed_tokens.embedding')
+            )
+
+        return super().from_pretrained(
             path_or_repo,
-            config,
-            module_map,
+            config=config,
+            module_map=module_map,
             local=local,
             mesh=mesh,
             sharding_rules=sharding_rules,
@@ -3271,5 +3262,5 @@ __all__ = [
     'TransformerContext',
     'TransformerModel',
     'TransformerCausalLM',
-    'TransformerConditionalGeneration',
+    'TransformerMultimodalLM',
 ]

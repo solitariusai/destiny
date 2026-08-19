@@ -21,7 +21,7 @@ import jax.numpy as jnp, jax
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes.transformers._ordinario import (
     TransformerCausalLM,
-    TransformerConditionalGeneration,
+    TransformerMultimodalLM,
     TransformerContext
 )
 from taktiny.cosettes.transformers.gemma import (
@@ -201,16 +201,22 @@ class Gemma3(TransformerCausalLM):
             **kwargs,
         )
 
-class Gemma3ConditionalGeneration(TransformerConditionalGeneration):
+# TODO: rewrite
+class Gemma3ConditionalGeneration(TransformerMultimodalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
+        language_model = TransformerCausalLM(
+            config=config,
             decoder=Gemma3DecoderLayer,
             norm=nn.RMSNorm,
             **kwargs,
         )
+        super().__init__(
+            config,
+            language_model=language_model,
+            **kwargs,
+        )
 
-class Gemma4(TransformerConditionalGeneration):
+class Gemma4(TransformerCausalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         super().__init__(
             config,
@@ -219,15 +225,34 @@ class Gemma4(TransformerConditionalGeneration):
             **kwargs,
         )
 
-class Gemma4Unified(TransformerConditionalGeneration):
+class Gemma4Multimodal(TransformerMultimodalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
+        language_model = Gemma4(
+            config=config,
+            **kwargs,
+        )
         super().__init__(
             config,
+            language_model=language_model,
+            **kwargs,
+        )
+
+# TODO
+class Gemma4Unified(TransformerMultimodalLM):
+    def __init__(self, config: ModelConfig, **kwargs) -> None:
+        language_model = TransformerCausalLM(
+            config=config,
             decoder=Gemma4DecoderLayer,
             norm=nn.RMSNorm,
             **kwargs,
         )
+        super().__init__(
+            config,
+            language_model=language_model,
+            **kwargs,
+        )
 
+# TODO
 class DiffusionGemma(nn.Module):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
@@ -237,7 +262,8 @@ class_map = [
     ('Gemma2ForCausalLM', Gemma2),
     ('Gemma3ForCausalLM', Gemma3),
     ('Gemma3ForConditionalGeneration', Gemma3ConditionalGeneration),
-    ('Gemma4ForConditionalGeneration', Gemma4),
+    ('Gemma4ForCausalLM', Gemma4),
+    ('Gemma4ForConditionalGeneration', Gemma4Multimodal),
     ('Gemma4UnifiedForConditionalGeneration', Gemma4Unified),
     ('DiffusionGemmaForBlockDiffusion', DiffusionGemma),
 ]

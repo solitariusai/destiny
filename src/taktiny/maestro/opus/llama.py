@@ -18,7 +18,7 @@ from typing import Any
 import typing as tp
 
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes.transformers._ordinario import TransformerCausalLM, TransformerConditionalGeneration
+from taktiny.cosettes.transformers._ordinario import TransformerCausalLM, TransformerMultimodalLM
 from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
 from taktiny.maestro.config import ModelConfig
 from taktiny import nn
@@ -34,12 +34,17 @@ class Llama(TransformerCausalLM):
         )
 
 # TODO: Llama4
-class Llama4(TransformerConditionalGeneration):
+class Llama4(TransformerMultimodalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
+        language_model = TransformerCausalLM(
+            config=config,
             decoder=LlamaDecoderLayer,
             norm=nn.RMSNorm,
+            **kwargs,
+        )
+        super().__init__(
+            config,
+            language_model=language_model,
             **kwargs,
         )
 

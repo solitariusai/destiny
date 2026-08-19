@@ -21,7 +21,7 @@ from taktiny.maestro._livret import repertoire
 from taktiny.maestro.config import ModelConfig
 from taktiny.transformer import (
     TransformerCausalLM,
-    TransformerConditionalGeneration,
+    TransformerMultimodalLM,
 )
 from taktiny.cosettes.transformers.qwen import (
     QwenDecoderLayer,
@@ -144,12 +144,17 @@ class Qwen3Next(TransformerCausalLM):
         )
 
 # TODO: Qwen3_5MoE
-class Qwen3_5MoE(TransformerConditionalGeneration):
+class Qwen3_5MoE(TransformerMultimodalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
+        language_model = TransformerCausalLM(
+            config=config,
             decoder=Qwen2DecoderLayer,
             norm=nn.RMSNorm,
+            **kwargs,
+        )
+        super().__init__(
+            config,
+            language_model=language_model,
             **kwargs,
         )
 
