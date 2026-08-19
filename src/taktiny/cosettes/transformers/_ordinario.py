@@ -3178,7 +3178,15 @@ class TransformerMultimodalLM(PretrainedModel):
             raise NotImplementedError("Subclass should implement forward pass or provide language_model / model")
 
     @classmethod
-    def from_pretrained(cls, path_or_repo: tp.Any, mesh: tp.Any=None, sharding_rules: tp.Any=None, local: bool=False, **kwargs: tp.Any) -> tp.Any:
+    def from_pretrained(
+        cls,
+        path_or_repo: tp.Any,
+        mesh: tp.Any = None,
+        sharding_rules: tp.Any = None,
+        local: bool = False,
+        module_map: tp.List | None = None,
+        **kwargs: tp.Any,
+    ) -> tp.Any:
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -3188,20 +3196,23 @@ class TransformerMultimodalLM(PretrainedModel):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
 
-        module_map = [
+        rules = [
             ("model.language_model.", "language_model.model."),
             ("embed_tokens.weight", "embed_tokens.embedding"),
         ]
 
         if getattr(config, 'tie_word_embeddings', False):
-            module_map.append(
+            rules.append(
                 ('lm_head.weight', 'language_model.model.embed_tokens.embedding')
             )
+
+        if module_map is not None:
+            rules.extend(module_map)
 
         return super().from_pretrained(
             path_or_repo,
             config=config,
-            module_map=module_map,
+            module_map=rules,
             local=local,
             mesh=mesh,
             sharding_rules=sharding_rules,
