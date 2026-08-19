@@ -322,9 +322,9 @@ class Gemma4DecoderLayer(Gemma3DecoderLayer):
             from taktiny.layers.ffn import MoeFFN
             module = MoeFFN(
                 hidden_size=kwargs['hidden_size'],
-                intermediate_size=getattr(text_config, 'moe_intermediate_size', kwargs['intermediate_size']),
-                num_experts=getattr(text_config, 'num_experts', 1),
-                num_experts_per_tok=getattr(text_config, 'top_k_experts', 1),
+                intermediate_size=getattr(text_config, 'moe_intermediate_size', None) or kwargs['intermediate_size'],
+                num_experts=getattr(text_config, 'num_experts', None) or 1,
+                num_experts_per_tok=getattr(text_config, 'top_k_experts', None) or 1,
                 activation=kwargs['hidden_act'],
                 bias=kwargs['mlp_bias'],
                 dtype=kwargs.get('dtype', None),
