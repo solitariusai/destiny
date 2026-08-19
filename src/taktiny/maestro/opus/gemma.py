@@ -238,11 +238,10 @@ def _split_gemma4_gate_up(tensor: jax.Array) -> tuple[jax.Array, jax.Array]:
 
 
 _GEMMA4_MODULE_MAP = [
-    ('.experts.gate_up_proj', ['.experts.w1.value', '.experts.w3.value'], _split_gemma4_gate_up),
-    ('.experts.down_proj', '.experts.w2.value'),
-    ('.router.proj.weight', '.experts.gate.weight'),
-    ('.layer_scalar', '.layer_scalar.value'),
-    ('.post_feedforward_layernorm.weight', '.post_feedforward_layernorm_1.weight'),
+    ('experts.gate_up_proj', ['experts.w1', 'experts.w3'], _split_gemma4_gate_up),
+    ('experts.down_proj', 'experts.w2'),
+    ('router.proj.weight', 'experts.gate.weight'),
+    ('post_feedforward_layernorm.weight', 'post_feedforward_layernorm_1.weight'),
 ]
 
 

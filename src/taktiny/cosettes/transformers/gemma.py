@@ -334,7 +334,7 @@ class Gemma4DecoderLayer(TransformerDecoderLayer):
         )
 
         self.layer_scalar = nn.Parameter(
-            jnp.ones((self.hidden_size,), dtype=self.dtype if self.dtype is not None else jnp.bfloat16)
+            jnp.ones((), dtype=self.dtype if self.dtype is not None else jnp.bfloat16)
         )
 
         window_size = self.self_attn.window_size
