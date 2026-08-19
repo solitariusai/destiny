@@ -3190,7 +3190,7 @@ class TransformerMultimodalLM(PretrainedModel):
 
         module_map = [
             ("model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
-            ("language_model.model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
+            ("model.language_model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
         ]
 
         if getattr(config, 'tie_word_embeddings', False):
@@ -3198,7 +3198,7 @@ class TransformerMultimodalLM(PretrainedModel):
                 ('lm_head.weight', 'language_model.model.embed_tokens.embedding')
             )
             module_map.append(
-                ('language_model.lm_head.weight', 'language_model.model.embed_tokens.embedding')
+                ('model.language_model.lm_head.weight', 'language_model.model.embed_tokens.embedding')
             )
 
         return super().from_pretrained(
