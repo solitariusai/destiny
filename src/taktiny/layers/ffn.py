@@ -17,6 +17,7 @@ TODO: rewrite this file
 """
 from __future__ import annotations
 from typing import Any
+import typing as tp
 import jax, jax.numpy as jnp
 
 from taktiny.utils.typing import AxisNames, ShardMode
@@ -379,7 +380,7 @@ class MoeFFN(nn.Module):
         *,
         num_experts: int,
         num_experts_per_tok: int = 1,
-        activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+        activation: tp.Callable[[jax.Array], jax.Array] = jax.nn.silu,
         bias: bool = False,
         dtype: str | None = None,
         rngs: nn.Rngs | None = None,
@@ -394,13 +395,10 @@ class MoeFFN(nn.Module):
         self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode)
         
         # Expert weights for GMM: [num_experts, in_features, out_features]
-        rng1 = rngs() if rngs is not None else jax.random.PRNGKey(0)
-        rng3 = rngs() if rngs is not None else jax.random.PRNGKey(1)
-        rng2 = rngs() if rngs is not None else jax.random.PRNGKey(2)
-        
-        self.w1 = nn.Parameter(jax.random.normal(rng1, (num_experts, hidden_size, intermediate_size), dtype=dtype))
-        self.w3 = nn.Parameter(jax.random.normal(rng3, (num_experts, hidden_size, intermediate_size), dtype=dtype))
-        self.w2 = nn.Parameter(jax.random.normal(rng2, (num_experts, intermediate_size, hidden_size), dtype=dtype))
+        rngs = rngs if rngs is not None else nn.Rngs(0)
+        self.w1 = nn.Parameter(jax.random.normal(rngs(), (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w3 = nn.Parameter(jax.random.normal(rngs(), (num_experts, hidden_size, intermediate_size), dtype=dtype))
+        self.w2 = nn.Parameter(jax.random.normal(rngs(), (num_experts, intermediate_size, hidden_size), dtype=dtype))
 
     def __call__(self, x: jax.Array, out_sharding: Any = None) -> jax.Array:
         orig_shape = x.shape
@@ -426,12 +424,12 @@ class MoeFFN(nn.Module):
         # 4. Multiply by routing weights
         flat_indices = jnp.ravel(selected_experts)
         sort_inds = jnp.argsort(flat_indices)
-        sorted_weights = jnp.ravel(routing_weights)[sort_inds]
+        sorted_weights = jnp.ravel(routing_weights)[sort_inds].astype(expert_out.dtype)
         expert_out = expert_out * sorted_weights[:, None]
         
         # 5. Unroute
         out_flat = self.apply_unroute(expert_out, selected_experts)
-        out = out_flat.reshape(orig_shape)
+        out = out_flat.reshape(orig_shape).astype(x.dtype)
         if out_sharding is not None:
             out = jax.lax.with_sharding_constraint(out, out_sharding)
         return out
