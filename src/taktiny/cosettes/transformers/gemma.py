@@ -324,6 +324,9 @@ class Gemma4DecoderLayer(TransformerDecoderLayer):
                 'pre_feedforward_layernorm_2': Gemma3RMSNorm,
                 'experts': MoeFFN,
                 'post_feedforward_layernorm_2': Gemma3RMSNorm,
+                # Final norm applied after combining the dense MLP and experts
+                # branches (the checkpoint's post_feedforward_layernorm).
+                'post_feedforward_layernorm': Gemma3RMSNorm,
             })
 
         super().__init__(

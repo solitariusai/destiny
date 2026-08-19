@@ -241,8 +241,36 @@ _GEMMA4_MODULE_MAP = [
     ('experts.gate_up_proj', ['experts.w1', 'experts.w3'], _split_gemma4_gate_up),
     ('experts.down_proj', 'experts.w2'),
     ('router.proj.weight', 'experts.gate.weight'),
-    ('post_feedforward_layernorm.weight', 'post_feedforward_layernorm_1.weight'),
 ]
+
+
+def _gemma4_module_map(
+    config: ModelConfig,
+    module_map: tp.Any,
+    extra_module_map: tp.Any,
+) -> list[tp.Any]:
+    """Build the Gemma 4 module map, adjusted for the MoE layout.
+
+    MoE layers carry three post-FFN norms in the checkpoint
+    (``post_feedforward_layernorm``, ``_1``, ``_2``) that map to the dense-MLP
+    norm, the experts norm, and the final combine norm by name. Non-MoE layers
+    carry only ``post_feedforward_layernorm``, which taktiny names
+    ``post_feedforward_layernorm_1``, so that rename is applied only there.
+    """
+    text_config = getattr(config, 'text_config', config)
+    enable_moe = getattr(text_config, 'enable_moe_block', False)
+    rules = [*_GEMMA4_MODULE_MAP]
+    if not enable_moe:
+        rules.append(
+            (
+                'post_feedforward_layernorm.weight',
+                'post_feedforward_layernorm_1.weight',
+            )
+        )
+    rules.extend(module_map or [])
+    if extra_module_map:
+        rules.extend(extra_module_map)
+    return rules
 
 
 class Gemma4(TransformerCausalLM):
@@ -275,9 +303,7 @@ class Gemma4(TransformerCausalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
-        rules = [*_GEMMA4_MODULE_MAP, *(module_map or [])]
-        if extra_module_map:
-            rules.extend(extra_module_map)
+        rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,
             mesh=mesh,
@@ -322,9 +348,7 @@ class Gemma4Multimodal(TransformerMultimodalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
-        rules = [*_GEMMA4_MODULE_MAP, *(module_map or [])]
-        if extra_module_map:
-            rules.extend(extra_module_map)
+        rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,
             mesh=mesh,

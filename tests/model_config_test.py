@@ -209,3 +209,17 @@ def test_local_from_pretrained_missing_config_raises_clear_error():
 
     with pytest.raises(FileNotFoundError):
         Llama.from_pretrained(missing, local=True)
+
+
+def test_gemma4_module_map_is_moe_aware():
+    from taktiny.maestro.opus.gemma import _gemma4_module_map
+
+    moe = ModelConfig(text_config=ModelConfig(enable_moe_block=True))
+    plain = ModelConfig(text_config=ModelConfig(enable_moe_block=False))
+    norm_rename = (
+        'post_feedforward_layernorm.weight',
+        'post_feedforward_layernorm_1.weight',
+    )
+
+    assert norm_rename not in _gemma4_module_map(moe, None, None)
+    assert norm_rename in _gemma4_module_map(plain, None, None)
