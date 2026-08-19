@@ -258,14 +258,6 @@ def _gemma4_module_map(
     module_map: tp.Any,
     extra_module_map: tp.Any,
 ) -> list[tp.Any]:
-    """Build the Gemma 4 module map, adjusted for the MoE layout.
-
-    MoE layers carry three post-FFN norms in the checkpoint
-    (``post_feedforward_layernorm``, ``_1``, ``_2``) that map to the dense-MLP
-    norm, the experts norm, and the final combine norm by name. Non-MoE layers
-    carry only ``post_feedforward_layernorm``, which taktiny names
-    ``post_feedforward_layernorm_1``, so that rename is applied only there.
-    """
     text_config = getattr(config, 'text_config', config)
     enable_moe = getattr(text_config, 'enable_moe_block', False)
     rules = [*_GEMMA4_MODULE_MAP]
@@ -276,6 +268,15 @@ def _gemma4_module_map(
                 'post_feedforward_layernorm_1.weight',
             )
         )
+    layer_types = getattr(text_config, 'layer_types', None)
+    if layer_types is not None:
+        for idx, ltype in enumerate(layer_types):
+            if ltype in ('full_attention', 'full'):
+                rules.append((
+                    f'layers.{idx}.self_attn.k_proj.weight',
+                    [f'layers.{idx}.self_attn.k_proj.weight', f'layers.{idx}.self_attn.v_proj.weight'],
+                    lambda k: (k, k),
+                ))
     rules.extend(module_map or [])
     if extra_module_map:
         rules.extend(extra_module_map)
@@ -284,6 +285,11 @@ def _gemma4_module_map(
 
 class Gemma4(TransformerCausalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
+        text_config = getattr(config, 'text_config', config)
+        global_head_dim = getattr(text_config, 'global_head_dim', None)
+        head_dim = getattr(text_config, 'head_dim', None)
+        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
+            kwargs['use_list'] = True
         super().__init__(
             config,
             decoder=Gemma4DecoderLayer,
@@ -312,6 +318,11 @@ class Gemma4(TransformerCausalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
+        text_config = getattr(config, 'text_config', config)
+        global_head_dim = getattr(text_config, 'global_head_dim', None)
+        head_dim = getattr(text_config, 'head_dim', None)
+        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
+            kwargs['use_list'] = True
         rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,
@@ -357,6 +368,11 @@ class Gemma4Multimodal(TransformerMultimodalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
+        text_config = getattr(config, 'text_config', config)
+        global_head_dim = getattr(text_config, 'global_head_dim', None)
+        head_dim = getattr(text_config, 'head_dim', None)
+        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
+            kwargs['use_list'] = True
         rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,

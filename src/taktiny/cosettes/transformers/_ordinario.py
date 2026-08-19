@@ -35,7 +35,7 @@ from taktiny.utils.typing import (
     ShardMode,
 )
 from taktiny.utils.sharding import create_sharding
-from taktiny.layers import (
+from taktiny.cosettes.layers import (
     AdaXNorm,
     Attention,
     ConditionalTransformerLayer as _ConditionalTransformerLayer,
@@ -181,6 +181,8 @@ class TransformerDecoderLayer(nn.Module):
             layer_type = layer_types[layer_idx]
             if layer_type in ('full_attention', 'full'):
                 sliding_window  = None
+                head_dim = getattr(config_text, 'global_head_dim', None) or head_dim
+                num_kv_heads = getattr(config_text, 'num_global_key_value_heads', None) or num_kv_heads
 
         hidden_act = config_text.hidden_act or config_text.hidden_activation or config_text.act or 'silu'
         if hidden_act in ('gelu_pytorch_tanh', 'gelu_new', 'gelu_fast'):
@@ -363,7 +365,7 @@ class TransformerDecoderLayer(nn.Module):
                 shard_mode=shard_mode,
             )
         else:
-            from taktiny.layers.ffn import MoeFFN
+            from taktiny.cosettes.layers.ffn import MoeFFN
             if issubclass(module_type, MoeFFN):
                 module = module_type(
                     hidden_size=hidden_size,
@@ -383,7 +385,7 @@ class TransformerDecoderLayer(nn.Module):
                     f'Unsupported decoder module {name}: {module_type.__name__}'
                 )
 
-        from taktiny.layers.ffn import MoeFFN
+        from taktiny.cosettes.layers.ffn import MoeFFN
         if issubclass(module_type, (nn.RMSNorm, nn.LayerNorm)):
             kind = 'norm'
         elif issubclass(module_type, Attention):
