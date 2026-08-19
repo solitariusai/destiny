@@ -388,8 +388,8 @@ class MoeFFN(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_experts = num_experts
-        self.num_experts_per_tok = num_experts_per_tok
-        self.activation = activation
+        self.num_experts_per_tok = num_experts_per_tok if num_experts_per_tok is not None else 1
+        self.activation = _resolve_activation(activation)
         
         self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode)
         
@@ -402,7 +402,7 @@ class MoeFFN(nn.Module):
         self.w3 = nn.Parameter(jax.random.normal(rng3, (num_experts, hidden_size, intermediate_size), dtype=dtype))
         self.w2 = nn.Parameter(jax.random.normal(rng2, (num_experts, intermediate_size, hidden_size), dtype=dtype))
 
-    def __call__(self, x: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, out_sharding: Any = None) -> jax.Array:
         orig_shape = x.shape
         x_flat = x.reshape(-1, self.hidden_size)
         
@@ -431,7 +431,10 @@ class MoeFFN(nn.Module):
         
         # 5. Unroute
         out_flat = self.apply_unroute(expert_out, selected_experts)
-        return out_flat.reshape(orig_shape)
+        out = out_flat.reshape(orig_shape)
+        if out_sharding is not None:
+            out = jax.lax.with_sharding_constraint(out, out_sharding)
+        return out
 
     @classmethod
     def apply_gmm(
