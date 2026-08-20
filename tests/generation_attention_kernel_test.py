@@ -4,6 +4,7 @@ import pytest
 from taktiny import nn
 from taktiny.cosettes.transformers.ordinario import TransformerMultimodalLM
 from taktiny.maestro.config import ModelConfig
+from taktiny.maestro.opus.gemma import Gemma4
 from taktiny.maestro.opus.llama import Llama
 
 
@@ -208,3 +209,44 @@ def test_multimodal_generation_forwards_streamer_to_language_model():
 
     assert output is input_ids
     assert language_model.kwargs['streamer'] is streamer
+
+
+def test_generation_supports_mixed_kv_head_layouts_in_seqstack():
+    config = ModelConfig(
+        num_hidden_layers=2,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        global_head_dim=4,
+        num_global_key_value_heads=1,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        rope_scaling=None,
+        rms_norm_eps=1e-6,
+        hidden_act='silu',
+        attention_bias=False,
+        attention_dropout=0.0,
+        mlp_bias=False,
+        tie_word_embeddings=True,
+        eos_token_id=None,
+        pad_token_id=0,
+        sliding_window=8,
+        layer_types=['sliding_attention', 'full_attention'],
+        enable_moe_block=False,
+        dtype='float32',
+    )
+    model = Gemma4(config, rngs=nn.Rngs(0), use_list=False)
+    input_ids = jnp.asarray([[1, 2, 3]], dtype=jnp.int32)
+
+    output = model.generate(
+        input_ids,
+        max_new_tokens=2,
+        temperature=0.0,
+        top_k=0,
+        attention_kernel='dot_product',
+    )
+
+    assert output.shape == (1, 5)
