@@ -2708,13 +2708,56 @@ class TransformerCausalLM(PretrainedModel):
                 f'got {model_dtype}'
             )
 
-        cache_shape = (
-            num_layers,
-            batch_size,
-            max_seq_len,
-            num_kv_heads,
-            head_dim,
-        )
+        layer_types = getattr(self.config, 'layer_types', None)
+        cache_layouts = []
+        if layer_types is not None:
+            global_head_dim = (
+                getattr(self.config, 'global_head_dim', None)
+                or head_dim
+            )
+            global_num_kv_heads = (
+                getattr(
+                    self.config,
+                    'num_global_key_value_heads',
+                    None,
+                )
+                or num_kv_heads
+            )
+            for layer_type in layer_types[:num_layers]:
+                if layer_type in ('full_attention', 'full'):
+                    cache_layouts.append(
+                        (global_num_kv_heads, global_head_dim)
+                    )
+                else:
+                    cache_layouts.append((num_kv_heads, head_dim))
+        if not cache_layouts:
+            cache_layouts = [(num_kv_heads, head_dim)] * num_layers
+
+        unique_cache_layouts = set(cache_layouts)
+        if len(unique_cache_layouts) == 1:
+            cache_num_heads, cache_head_dim = cache_layouts[0]
+            cache_shape = (
+                num_layers,
+                batch_size,
+                max_seq_len,
+                cache_num_heads,
+                cache_head_dim,
+            )
+        else:
+            # Mixed attention layouts cannot share head-shaped cache axes.
+            # Store each layer flattened and let Attention view its active
+            # prefix as [kv_heads, head_dim]. This keeps scan-compatible cache
+            # arrays without padding both logical axes to their maxima.
+            cache_width = max(
+                cache_num_heads * cache_head_dim
+                for cache_num_heads, cache_head_dim in cache_layouts
+            )
+            cache_shape = (
+                num_layers,
+                batch_size,
+                max_seq_len,
+                cache_width,
+            )
         key_cache = jnp.zeros(cache_shape, dtype=model_dtype)
         value_cache = jnp.zeros(cache_shape, dtype=model_dtype)
         ctx = TransformerContext(

@@ -865,17 +865,40 @@ class Attention(nn.Module):
 
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
+            flattened_cache = k_cache.ndim == 3
+            if flattened_cache:
+                if v_cache.ndim != 3:
+                    raise ValueError(
+                        'key and value caches should use the same layout'
+                    )
+                key_shape = k.shape
+                value_shape = v.shape
+                key_width = key_shape[-2] * key_shape[-1]
+                value_width = value_shape[-2] * value_shape[-1]
+                if (
+                    key_width > k_cache.shape[-1]
+                    or value_width > v_cache.shape[-1]
+                ):
+                    raise ValueError(
+                        'flattened KV cache width is smaller than the '
+                        'projected key or value width'
+                    )
+                k_update = k.reshape(*k.shape[:-2], key_width)
+                v_update = v.reshape(*v.shape[:-2], value_width)
+            else:
+                k_update = k
+                v_update = v
             cache_position = jnp.asarray(position_idx, dtype=jnp.int32)
             if cache_position.ndim == 0:
                 k_cache = jax.lax.dynamic_update_slice(
                     k_cache,
-                    k,
-                    (0, cache_position, 0, 0),
+                    k_update,
+                    (0, cache_position) + (0,) * (k_cache.ndim - 2),
                 )
                 v_cache = jax.lax.dynamic_update_slice(
                     v_cache,
-                    v,
-                    (0, cache_position, 0, 0),
+                    v_update,
+                    (0, cache_position) + (0,) * (v_cache.ndim - 2),
                 )
             elif cache_position.ndim == 1:
                 def update_cache(
@@ -886,17 +909,17 @@ class Attention(nn.Module):
                     return jax.lax.dynamic_update_slice(
                         cache_row,
                         value_row,
-                        (row_position, 0, 0),
+                        (row_position,) + (0,) * (cache_row.ndim - 1),
                     )
 
                 k_cache = jax.vmap(update_cache)(
                     k_cache,
-                    k,
+                    k_update,
                     cache_position,
                 )
                 v_cache = jax.vmap(update_cache)(
                     v_cache,
-                    v,
+                    v_update,
                     cache_position,
                 )
             else:
@@ -904,9 +927,24 @@ class Attention(nn.Module):
                     'position_idx must be a scalar or a batch vector'
                 )
 
-            # Use the full cache for attention
-            k = k_cache
-            v = v_cache
+            # Use the full cache for attention. Mixed-layout models store a
+            # flat cache and recover the layer-specific head view here.
+            if flattened_cache:
+                k = k_cache[..., :key_width].reshape(
+                    k_cache.shape[0],
+                    k_cache.shape[1],
+                    key_shape[-2],
+                    key_shape[-1],
+                )
+                v = v_cache[..., :value_width].reshape(
+                    v_cache.shape[0],
+                    v_cache.shape[1],
+                    value_shape[-2],
+                    value_shape[-1],
+                )
+            else:
+                k = k_cache
+                v = v_cache
 
         # Sliding Window / Causal Masking
         if is_causal or self.window_size is not None:
