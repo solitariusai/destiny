@@ -1039,6 +1039,63 @@ class PretrainedModel(nn.Module):
 
         cpu_device = jax.devices('cpu')[0]
         default_device = jax.devices()[0]
+        quantizers: dict[tuple[tp.Any, ...], tp.Callable[[tp.Any], tp.Any]] = {}
+
+        def quantize_weight(
+            value: tp.Any,
+            parameter: tp.Any,
+            rule: tp.Any,
+            quantization_kind: str,
+        ) -> tp.Any:
+            batch_axis_count = getattr(
+                parameter,
+                'quantization_batch_axis_count',
+                0,
+            )
+            input_axis_count = getattr(
+                parameter,
+                'input_axis_count',
+                None,
+            )
+            parameter_dtype = jnp.dtype(parameter.dtype)
+            cache_key = (
+                quantization_kind,
+                batch_axis_count,
+                input_axis_count,
+                str(parameter_dtype),
+                str(rule.weight_qtype),
+                rule.tile_size,
+                rule.weight_calibration_method,
+            )
+            quantizer = quantizers.get(cache_key)
+            if quantizer is None:
+                metadata = SimpleNamespace(
+                    dtype=parameter_dtype,
+                    input_axis_count=input_axis_count,
+                    quantization_batch_axis_count=batch_axis_count,
+                )
+                if quantization_kind == 'embedding':
+                    def apply(array: tp.Any) -> tp.Any:
+                        return quantize_embedding_weight(
+                            array,
+                            metadata,
+                            rule,
+                        )
+                else:
+                    def apply(array: tp.Any) -> tp.Any:
+                        return quantize_linear_weight(
+                            array,
+                            metadata,
+                            rule,
+                        )
+                quantizer = jax.jit(apply)
+                quantizers[cache_key] = quantizer
+
+            # Keep PTQ on the host so loading never needs a dense copy of the
+            # source weight in accelerator memory. Reusing the jitted callable
+            # fuses Qwix calibration and quantization for repeated layer shapes.
+            cpu_value = jax.device_put(value, cpu_device)
+            return quantizer(cpu_value)
 
         def parameter_sharding(
             parameter: tp.Any,
@@ -1133,19 +1190,12 @@ class PretrainedModel(nn.Module):
             )
             if rule is not None:
                 parameter.trainable = False
-                with jax.default_device(cpu_device):
-                    if quantization_kind == 'embedding':
-                        quantized = quantize_embedding_weight(
-                            value,
-                            parameter,
-                            rule,
-                        )
-                    else:
-                        quantized = quantize_linear_weight(
-                            value,
-                            parameter,
-                            rule,
-                        )
+                quantized = quantize_weight(
+                    value,
+                    parameter,
+                    rule,
+                    quantization_kind,
+                )
                 return place_qarray(quantized, parameter)
 
             target_dtype = np.dtype(parameter.dtype)
@@ -1381,24 +1431,14 @@ class PretrainedModel(nn.Module):
                                             - 1,
                                         ),
                                     )
-                                    with jax.default_device(cpu_device):
-                                        if (
-                                            stacked_state[
-                                                'quantization_kind'
-                                            ]
-                                            == 'embedding'
-                                        ):
-                                            layer_value = quantize_embedding_weight(
-                                                value,
-                                                layer_parameter,
-                                                stacked_state['rule'],
-                                            )
-                                        else:
-                                            layer_value = quantize_linear_weight(
-                                                value,
-                                                layer_parameter,
-                                                stacked_state['rule'],
-                                            )
+                                    layer_value = quantize_weight(
+                                        value,
+                                        layer_parameter,
+                                        stacked_state['rule'],
+                                        stacked_state[
+                                            'quantization_kind'
+                                        ],
+                                    )
 
                                     if stacked_state['value'] is None:
                                         def make_stacked_zero(arr: tp.Any) -> tp.Any:
