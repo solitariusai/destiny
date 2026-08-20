@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import pytest
 
 from taktiny import nn
+from taktiny.cosettes.transformers.ordinario import TransformerMultimodalLM
 from taktiny.maestro.config import ModelConfig
 from taktiny.maestro.opus.llama import Llama
 
@@ -185,3 +186,25 @@ def test_generation_uses_current_sliced_layer_count():
 
     assert isinstance(model.model.layers, nn.List)
     assert output.shape == (1, 5)
+
+
+def test_multimodal_generation_forwards_streamer_to_language_model():
+    class LanguageModel:
+        def generate(self, **kwargs):
+            self.kwargs = kwargs
+            return kwargs['input_ids']
+
+    streamer = object()
+    language_model = LanguageModel()
+    model = object.__new__(TransformerMultimodalLM)
+    model.language_model = language_model
+    input_ids = jnp.asarray([[1, 2, 3]], dtype=jnp.int32)
+
+    output = model.generate(
+        input_ids,
+        max_new_tokens=2,
+        streamer=streamer,
+    )
+
+    assert output is input_ids
+    assert language_model.kwargs['streamer'] is streamer

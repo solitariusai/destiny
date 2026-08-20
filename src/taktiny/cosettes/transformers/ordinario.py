@@ -3286,6 +3286,7 @@ class TransformerMultimodalLM(PretrainedModel):
         eos_token_id: int | list[int] | tuple[int, ...] | None = None,
         pad_token_id: int | None = None,
         seed: int = 42,
+        streamer: tp.Any = None,
         attention_kernel: str | Mapping[str, str] = 'auto',
     ) -> jax.Array:
         """Autoregressively generate tokens conditioned on text and optional multimodal inputs."""
@@ -3308,6 +3309,7 @@ class TransformerMultimodalLM(PretrainedModel):
                 eos_token_id=eos_token_id,
                 pad_token_id=pad_token_id,
                 seed=seed,
+                streamer=streamer,
                 attention_kernel=attention_kernel,
             )
         else:
