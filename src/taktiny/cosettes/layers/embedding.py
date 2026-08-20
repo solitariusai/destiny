@@ -25,7 +25,7 @@ from jax.nn.initializers import zeros
 
 from taktiny import nn
 from taktiny.cosettes.layers.positional_embedding import FrequencyEmbedding
-from taktiny.nn._continuo import (
+from taktiny.nn.continuo import (
     _canonical_axis,
     _constrain,
     _normalize_shape,

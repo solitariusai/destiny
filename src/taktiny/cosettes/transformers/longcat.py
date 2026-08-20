@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 from taktiny.cosettes import layers as ly
 from taktiny import nn
-from taktiny.cosettes._continuo import (
+from taktiny.cosettes.continuo import (
     _config_value,
     _approximate_gelu,
     _model_dtype,
@@ -31,13 +31,13 @@ from taktiny.cosettes._continuo import (
     image_transformer_dimensions,
     multi_axis_position_embedding,
 )
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.transformers.ordinario import (
     ConditionalTransformerLayer,
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )
 from taktiny.maestro.config import ModelConfig
-from taktiny.nn._continuo import _constrain
+from taktiny.nn.continuo import _constrain
 
 
 def _audio_dimensions(

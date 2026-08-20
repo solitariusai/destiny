@@ -20,7 +20,7 @@ import jax.numpy as jnp
 
 from taktiny import nn
 from taktiny.nn.linear import default_linear_initializer
-from taktiny.nn._continuo import (
+from taktiny.nn.continuo import (
     _constrain,
     _normalize_shape,
     _resolve_activation,

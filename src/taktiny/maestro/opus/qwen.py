@@ -17,7 +17,7 @@ from __future__ import annotations
 import typing as tp
 import jax.numpy as jnp, jax
 
-from taktiny.maestro._livret import repertoire
+from taktiny.maestro.livret import repertoire
 from taktiny.maestro.config import ModelConfig
 from taktiny.transformer import (
     TransformerCausalLM,

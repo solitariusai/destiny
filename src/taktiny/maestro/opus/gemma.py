@@ -18,8 +18,8 @@ from typing import Any
 import typing as tp
 import jax.numpy as jnp, jax
 
-from taktiny.maestro._livret import repertoire
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.maestro.livret import repertoire
+from taktiny.cosettes.transformers.ordinario import (
     TransformerCausalLM,
     TransformerMultimodalLM,
     TransformerContext
@@ -249,7 +249,9 @@ def _transpose_expert_weight(tensor: jax.Array) -> jax.Array:
 _GEMMA4_MODULE_MAP = [
     ('experts.gate_up_proj', ['experts.w1', 'experts.w3'], _split_gemma4_gate_up),
     ('experts.down_proj', 'experts.w2', _transpose_expert_weight),
-    ('router.proj.weight', 'experts.gate.weight'),
+    ('router.proj.weight', 'experts.router.proj.weight'),
+    ('router.scale', 'experts.router.scale'),
+    ('router.per_expert_scale', 'experts.router.per_expert_scale'),
 ]
 
 

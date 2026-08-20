@@ -22,9 +22,9 @@ import jax, jax.numpy as jnp
 from jax.nn.initializers import normal
 
 from taktiny import nn
-from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
+from taktiny.cosettes.transformers.ordinario import TransformerDecoderLayer
 from taktiny.maestro.config import ModelConfig
-from taktiny.cosettes.layers import Attention, GateMLP, RotaryEmbedding
+from taktiny.cosettes.layers import Attention, GateMLP, MoeFFN, RotaryEmbedding
 from taktiny.utils.typing import AxisNames, Initializer, ShardMode
 
 
@@ -66,7 +66,7 @@ class GemmaRMSNorm(nn.RMSNorm):
         x_norm = x * jax.lax.rsqrt(var + self.eps)
 
         if self.with_scale:
-            x_norm = x_norm * (1.0 + self.weight)
+            x_norm = x_norm * (1.0 + self.weight) # pyright: ignore[reportOperatorIssue]
 
         if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
             x_norm = jax.lax.with_sharding_constraint(x_norm, out_sharding)
@@ -303,6 +303,120 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
         self.self_attn.pos_emb.base = rope_base
 
 
+class Gemma4Router(nn.Module):
+    """Gemma 4 normalized top-k expert router."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_experts: int,
+        num_experts_per_tok: int,
+        *,
+        eps: float = 1e-6,
+        dtype: Any = jnp.bfloat16,
+        rngs: nn.Rngs,
+        shard_mode: ShardMode = ShardMode.AUTO,
+        quant: Any = None,
+        dot_general: Any = None,
+    ) -> None:
+        self.num_experts_per_tok = num_experts_per_tok
+        self.scalar_root_size = hidden_size ** -0.5
+        self.norm = nn.RMSNorm(
+            hidden_size,
+            eps=eps,
+            with_scale=False,
+            shard_mode=shard_mode,
+        )
+        self.proj = nn.Linear(
+            hidden_size,
+            num_experts,
+            bias=False,
+            dtype=dtype,
+            rngs=rngs,
+            axis_names=('embed', 'experts'),
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general,
+        )
+        self.scale = nn.Parameter(
+            jnp.ones((hidden_size,), dtype=dtype),
+            axis_names=('embed',),
+        )
+        self.per_expert_scale = nn.Parameter(
+            jnp.ones((num_experts,), dtype=dtype),
+            axis_names=('experts',),
+        )
+
+    def __call__(
+        self,
+        hidden_states: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        hidden_states = self.norm(hidden_states)
+        hidden_states = (
+            hidden_states
+            * self.scale.value.astype(hidden_states.dtype)
+            * jnp.asarray(self.scalar_root_size, dtype=hidden_states.dtype)
+        )
+        expert_scores = self.proj(hidden_states)
+        probabilities = jax.nn.softmax(
+            expert_scores.astype(jnp.float32),
+            axis=-1,
+        )
+        weights, indices = jax.lax.top_k(
+            probabilities,
+            self.num_experts_per_tok,
+        )
+        weights /= jnp.sum(weights, axis=-1, keepdims=True)
+        weights *= self.per_expert_scale.value[indices].astype(weights.dtype)
+        return probabilities, weights, indices
+
+
+class Gemma4MoeFFN(MoeFFN):
+    """Gemma 4 experts using its learned normalized router."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        *,
+        num_experts: int,
+        num_experts_per_tok: int = 1,
+        activation: Any = jax.nn.silu,
+        bias: bool = False,
+        dtype: Any = None,
+        rngs: nn.Rngs | None = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+        quant: Any = None,
+        dot_general: Any = None,
+    ) -> None:
+        if rngs is None:
+            rngs = nn.Rngs(0)
+        router = Gemma4Router(
+            hidden_size,
+            num_experts,
+            num_experts_per_tok,
+            dtype=dtype or jnp.bfloat16,
+            rngs=rngs,
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general,
+        )
+        super().__init__(
+            hidden_size,
+            intermediate_size,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            activation=activation,
+            bias=bias,
+            dtype=dtype,
+            rngs=rngs,
+            shard_mode=shard_mode,
+            quant=quant,
+            dot_general=dot_general,
+            router=router,
+        )
+
+
 class Gemma4DecoderLayer(TransformerDecoderLayer):
     """Gemma 4 Decoder Layer with parallel Dense MLP and Sparse MoE branches."""
 
@@ -319,10 +433,9 @@ class Gemma4DecoderLayer(TransformerDecoderLayer):
             'post_feedforward_layernorm_1': Gemma3RMSNorm,
         }
         if enable_moe:
-            from taktiny.cosettes.layers.ffn import MoeFFN
             modules.update({
                 'pre_feedforward_layernorm_2': Gemma3RMSNorm,
-                'experts': MoeFFN,
+                'experts': Gemma4MoeFFN,
                 'post_feedforward_layernorm_2': Gemma3RMSNorm,
                 # Final norm applied after combining the dense MLP and experts
                 # branches (the checkpoint's post_feedforward_layernorm).
@@ -340,16 +453,6 @@ class Gemma4DecoderLayer(TransformerDecoderLayer):
             jnp.ones((), dtype=self.dtype if self.dtype is not None else jnp.bfloat16)
         )
 
-        window_size = self.self_attn.window_size
-        if window_size is None:
-            window_size = getattr(text_config, 'max_position_embeddings', 262144)
-        window_size = jnp.asarray(window_size, dtype=jnp.int32)
-        rope_base = jnp.asarray(self.self_attn.pos_emb.base, dtype=jnp.float32)
-
-        self.sliding_window = window_size
-        self.self_attn.window_size = window_size
-        self.self_attn.pos_emb.base = rope_base
-
 
 
 __all__ = [
@@ -362,5 +465,7 @@ __all__ = [
     'Gemma3RMSNorm',
     'Gemma3Attention',
     'Gemma3DecoderLayer',
+    'Gemma4Router',
+    'Gemma4MoeFFN',
     'Gemma4DecoderLayer',
 ]

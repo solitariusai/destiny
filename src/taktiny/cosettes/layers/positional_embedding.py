@@ -19,7 +19,7 @@ import math
 import jax
 import jax.numpy as jnp
 from taktiny import nn
-from taktiny.nn._continuo import _constrain
+from taktiny.nn.continuo import _constrain
 from taktiny.utils.typing import AxisNames, DType, ShardMode
 
 def rotate_half(x: jax.Array) -> jax.Array:

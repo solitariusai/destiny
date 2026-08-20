@@ -4,8 +4,8 @@ import numpy as np
 
 from taktiny.cosettes import layers as ly
 from taktiny import nn
-from taktiny.cosettes._continuo import combine_joint_positions
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.continuo import combine_joint_positions
+from taktiny.cosettes.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )

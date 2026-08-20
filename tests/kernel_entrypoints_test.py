@@ -11,7 +11,7 @@ from taktiny.cosettes.kernels.attention.tokamax_splash import ring_attention_ker
 from taktiny.cosettes.kernels.attention.tokamax_splash import (
     splash_attention_mask,
 )
-from taktiny.kernels.ragged import ragged_gather
+from taktiny.cosettes.kernels.ragged import ragged_gather
 from taktiny.cosettes.kernels.ragged.ragged_gather_reduce import (
     ragged_gather_reduce as ragged_gather_reduce_v1,
 )

@@ -3,7 +3,7 @@ import jax.numpy as jnp
 
 from taktiny.cosettes import layers as ly
 from taktiny import nn
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.transformers.ordinario import (
     ConditionalTransformerLayer,
 )
 from taktiny.cosettes.transformers.allegro import (

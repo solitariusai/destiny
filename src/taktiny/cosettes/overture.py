@@ -869,6 +869,12 @@ class PretrainedModel(nn.Module):
         both single-file and sharded checkpoints, including architecture-
         specific filenames selected through ``weights_filename``.
         """
+        def set_config_override(name: str, value: tp.Any) -> None:
+            setattr(config, name, value)
+            text_config = vars(config).get('text_config')
+            if text_config is not None:
+                setattr(text_config, name, value)
+
         uniform_quant = None
         if dtype is not None:
             dtype_name = dtype.lower() if isinstance(dtype, str) else None
@@ -888,23 +894,22 @@ class PretrainedModel(nn.Module):
                     compute_dtype = 'bfloat16'
 
                 uniform_quant = dtype_name
-                setattr(config, 'dtype', compute_dtype)
-                setattr(config, 'torch_dtype', compute_dtype)
+                set_config_override('dtype', compute_dtype)
+                set_config_override('torch_dtype', compute_dtype)
             else:
-                setattr(config, 'dtype', dtype)
-                setattr(config, 'torch_dtype', dtype)
+                set_config_override('dtype', dtype)
+                set_config_override('torch_dtype', dtype)
         if quant is not None and uniform_quant is not None:
             from ..utils.quantization import merge_quantization
 
-            setattr(
-                config,
+            set_config_override(
                 'quant',
                 merge_quantization(quant, uniform_quant),
             )
         elif quant is not None:
-            setattr(config, 'quant', quant)
+            set_config_override('quant', quant)
         elif uniform_quant is not None:
-            setattr(config, 'quant', uniform_quant)
+            set_config_override('quant', uniform_quant)
 
         if not isinstance(weights_filename, str) or not weights_filename:
             raise ValueError('weights_filename must be a non-empty string')

@@ -21,7 +21,7 @@ __description__ = (
 )
 
 from taktiny.cosettes import kernels, layers
-from taktiny.maestro._prelude import Maestro
+from taktiny.maestro.prelude import Maestro
 from taktiny.maestro.config import ModelConfig
 from taktiny.takt import Takt
 from taktiny import nn, peft

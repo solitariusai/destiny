@@ -24,8 +24,8 @@ from dataclasses import replace
 from functools import partial
 
 from taktiny import nn
-from taktiny.cosettes._continuo import _approximate_gelu
-from taktiny.cosettes._overture import PretrainedModel
+from taktiny.cosettes.continuo import _approximate_gelu
+from taktiny.cosettes.overture import PretrainedModel
 from taktiny.maestro.config import ModelConfig
 from taktiny.utils.typing import (
     ArrayLike,
@@ -46,8 +46,9 @@ from taktiny.cosettes.layers import (
     JointTransformerLayer as _JointTransformerLayer,
     GatedParallelTransformerLayer as _GatedParallelTransformerLayer,
     RotaryEmbedding,
+    MoeFFN,
 )
-from taktiny.cosettes._continuo import (
+from taktiny.cosettes.continuo import (
     _activation,
     _config_value,
     _hidden_size,
@@ -55,7 +56,7 @@ from taktiny.cosettes._continuo import (
     _positive_int,
     _shard_mode,
 )
-from taktiny.nn._continuo import _constrain
+from taktiny.nn.continuo import _constrain
 
 
 KVCache = tuple[jax.Array, jax.Array]
@@ -282,7 +283,7 @@ class TransformerDecoderLayer(nn.Module):
         attention_dropout: float,
         mlp_bias: bool,
         eps: float,
-        dtype: DType | str,
+        dtype: DType,
         shard_mode: ShardMode,
         quant: tp.Any,
         dot_general: Callable[..., jax.Array] | None,
@@ -320,7 +321,7 @@ class TransformerDecoderLayer(nn.Module):
                     rope_scaling,
                 ),
                 bias=False,
-                qkv_norm_eps=eps,
+                qk_norm_eps=eps,
                 q_bias=attention_bias,
                 k_bias=attention_bias,
                 v_bias=attention_bias,
@@ -365,7 +366,6 @@ class TransformerDecoderLayer(nn.Module):
                 shard_mode=shard_mode,
             )
         else:
-            from taktiny.cosettes.layers.ffn import MoeFFN
             if issubclass(module_type, MoeFFN):
                 module = module_type(
                     hidden_size=hidden_size,
@@ -385,7 +385,6 @@ class TransformerDecoderLayer(nn.Module):
                     f'Unsupported decoder module {name}: {module_type.__name__}'
                 )
 
-        from taktiny.cosettes.layers.ffn import MoeFFN
         if issubclass(module_type, (nn.RMSNorm, nn.LayerNorm)):
             kind = 'norm'
         elif issubclass(module_type, Attention):
@@ -401,7 +400,7 @@ class TransformerDecoderLayer(nn.Module):
 
     @staticmethod
     def _apply_norm(
-        module: nn.Module,
+        module: tp.Callable,
         x: jax.Array,
         out_sharding: jax.sharding.Sharding | None,
     ) -> jax.Array:
@@ -457,7 +456,7 @@ class TransformerDecoderLayer(nn.Module):
 
             if pending is not None:
                 if hasattr(self, 'layer_scalar') and getattr(self, 'layer_scalar') is not None:
-                    pending = pending * self.layer_scalar.value.astype(pending.dtype)
+                    pending = pending * self.layer_scalar.value.astype(pending.dtype) # pyright: ignore[reportAttributeAccessIssue]
                 x = residual + pending
                 residual = x
                 pending = None
@@ -477,7 +476,7 @@ class TransformerDecoderLayer(nn.Module):
 
         if pending is not None:
             if hasattr(self, 'layer_scalar') and getattr(self, 'layer_scalar') is not None:
-                pending = pending * self.layer_scalar.value.astype(pending.dtype)
+                pending = pending * self.layer_scalar.value.astype(pending.dtype) # pyright: ignore[reportAttributeAccessIssue]
             x = residual + pending
 
         return x, new_cache

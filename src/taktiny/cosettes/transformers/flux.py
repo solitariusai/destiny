@@ -23,11 +23,11 @@ import jax.numpy as jnp
 
 from taktiny.cosettes import layers as ly
 from taktiny import nn
-from taktiny.cosettes._continuo import (
+from taktiny.cosettes.continuo import (
     _config_value,
     combine_joint_positions as _combine_positions,
 )
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )

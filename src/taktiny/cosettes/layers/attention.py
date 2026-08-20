@@ -15,14 +15,13 @@
 
 from __future__ import annotations
 from collections.abc import Callable
-from typing import Any, NamedTuple
 import typing as tp
 import jax
 import jax.numpy as jnp
 import math
 
 from taktiny import nn
-from taktiny.nn._continuo import _constrain
+from taktiny.nn.continuo import _constrain
 from taktiny.utils.typing import (
     AxisNames,
     DType,
@@ -31,7 +30,7 @@ from taktiny.utils.typing import (
     Sharding,
 )
 
-class SegmentIds(NamedTuple):
+class SegmentIds(tp.NamedTuple):
     """Compact query and key/value segment identifiers."""
     q: jax.Array
     kv: jax.Array
@@ -52,7 +51,7 @@ class _AcrossHeadsRMSNorm(nn.Module):
         self.head_dim = head_dim
         self.eps = eps
         self.weight = nn.Parameter(
-            jnp.ones((num_heads * head_dim,), dtype=dtype)
+            jnp.ones((num_heads * head_dim,), dtype=dtype) # pyright: ignore[reportUnknownMemberType]
         )
         self.weight.axis_names = ('attention_embed',)
 
@@ -85,10 +84,10 @@ class Attention(nn.Module):
         context_dim: int | None = None,
         pos_emb: nn.Module | None = None,
         bias: bool = False,
-        use_qkv_norm: bool = False,
-        qkv_norm_across_heads: bool = False,
-        qkv_norm_eps: float = 1e-5,
-        dtype: DType | str | None = None,
+        use_qk_norm: bool = False,
+        qk_norm_across_heads: bool = False,
+        qk_norm_eps: float = 1e-5,
+        dtype: DType | None = None,
         window_size: int | None = None,
         rngs: nn.Rngs,
         q_axis_names: AxisNames | None = None,
@@ -103,8 +102,8 @@ class Attention(nn.Module):
         softcap: float | None = None,
         dropout: float = 0.0,
         shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any = None,
-        dot_general: Any = None,
+        quant: tp.Any = None,
+        dot_general: tp.Any = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -116,9 +115,9 @@ class Attention(nn.Module):
                 f'{self.num_heads} and {self.num_kv_heads}'
             )
         self.context_dim = hidden_size if context_dim is None else context_dim
-        self.use_qkv_norm = use_qkv_norm
-        self.qkv_norm_across_heads = qkv_norm_across_heads
-        self.qkv_norm_eps = qkv_norm_eps
+        self.use_qk_norm = use_qk_norm
+        self.qk_norm_across_heads = qk_norm_across_heads
+        self.qk_norm_eps = qk_norm_eps
         self.window_size = window_size
         self.scaling = scaling
         self.softcap = softcap
@@ -163,36 +162,36 @@ class Attention(nn.Module):
 
         self.q_norm = self.k_norm = None
 
-        if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_q_norm', False):
+        if getattr(self, 'use_qk_norm', False) or getattr(self, 'use_q_norm', False):
             self.q_norm = (
                 _AcrossHeadsRMSNorm(
                     self.num_heads,
                     self.head_dim,
-                    eps=self.qkv_norm_eps,
+                    eps=self.qk_norm_eps,
                     dtype=dtype,
                 )
-                if self.qkv_norm_across_heads
+                if self.qk_norm_across_heads
                 else nn.RMSNorm(
                     self.head_dim,
-                    eps=self.qkv_norm_eps,
+                    eps=self.qk_norm_eps,
                     dtype=dtype,
                     axis_names=('head_dim',),
                     shard_mode=shard_mode,
                 )
             )
 
-        if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_k_norm', False):
+        if getattr(self, 'use_qk_norm', False) or getattr(self, 'use_k_norm', False):
             self.k_norm = (
                 _AcrossHeadsRMSNorm(
                     self.num_kv_heads,
                     self.head_dim,
-                    eps=self.qkv_norm_eps,
+                    eps=self.qk_norm_eps,
                     dtype=dtype,
                 )
-                if self.qkv_norm_across_heads
+                if self.qk_norm_across_heads
                 else nn.RMSNorm(
                     self.head_dim,
-                    eps=self.qkv_norm_eps,
+                    eps=self.qk_norm_eps,
                     dtype=dtype,
                     axis_names=('head_dim',),
                     shard_mode=shard_mode,
@@ -428,7 +427,7 @@ class Attention(nn.Module):
         mask_value: float = -1e9,
         cap: float | None = None,
         scale: float | None = None,
-        **kwargs: Any,
+        **kwargs: tp.Any,
     ) -> jax.Array:
         """Apply FlashAttention block masked kernel on Q, K, V."""
         from taktiny.cosettes.kernels.attention.flash_attention import flash_attention_block_masked
@@ -492,7 +491,7 @@ class Attention(nn.Module):
         scale: float | None = None,
         block_size: int = 256,
         interpret: bool | None = None,
-        **kwargs: Any,
+        **kwargs: tp.Any,
     ) -> jax.Array:
         """Apply the decode-only Ragged Attention kernel."""
         from taktiny.cosettes.kernels.attention.ragged_attention import (
@@ -555,7 +554,7 @@ class Attention(nn.Module):
         mask: jax.Array | None = None,
         segment_ids: SegmentIds | None = None,
         scale: float | None = None,
-        **kwargs: Any,
+        **kwargs: tp.Any,
     ) -> jax.Array:
         """Apply the Splash Attention reference with dense masks."""
         from taktiny.cosettes.kernels.attention.splash_attention import attention_reference
@@ -650,7 +649,7 @@ class Attention(nn.Module):
         ring_kernel: Callable[..., jax.Array] | None = None,
         segment_ids: SegmentIds | None = None,
         scale: float | None = None,
-        **kwargs: Any,
+        **kwargs: tp.Any,
     ) -> jax.Array:
         """Apply a prebuilt Ring Splash Attention kernel."""
         from taktiny.cosettes.kernels.attention.tokamax_splash import ring_attention_kernel
@@ -723,7 +722,7 @@ class Attention(nn.Module):
         scale: float | None = None,
         is_causal: bool = False,
         segment_ids: SegmentIds | jax.Array | None = None,
-        **kwargs: Any,
+        **kwargs: tp.Any,
     ) -> jax.Array:
         """
         Unified Entry Point for Attention Kernel Applications.
@@ -1080,8 +1079,8 @@ class JointAttention(nn.Module):
         *,
         pos_emb: nn.Module | None = None,
         bias: bool = False,
-        use_qkv_norm: bool = False,
-        qkv_norm_eps: float = 1e-5,
+        use_qk_norm: bool = False,
+        qk_norm_eps: float = 1e-5,
         dtype: DType | str | None = None,
         rngs: nn.Rngs | None = None,
         q_axis_names: AxisNames | None = None,
@@ -1095,14 +1094,14 @@ class JointAttention(nn.Module):
         scaling: float | None = None,
         context_first: bool = False,
         shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any = None,
-        dot_general: Any = None,
+        quant: tp.Any = None,
+        dot_general: tp.Any = None,
     ) -> None:
         if hidden_size1 <= 0 or hidden_size2 <= 0:
             raise ValueError('hidden sizes must be positive')
         if num_heads <= 0 or head_dim <= 0:
             raise ValueError('num_heads and head_dim must be positive')
-        if qkv_norm_eps <= 0:
+        if qk_norm_eps <= 0:
             raise ValueError('qkv_norm_eps must be positive')
         if rngs is None:
             raise ValueError(
@@ -1114,8 +1113,8 @@ class JointAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.pos_emb = pos_emb
-        self.use_qkv_norm = use_qkv_norm
-        self.qkv_norm_eps = qkv_norm_eps
+        self.use_qk_norm = use_qk_norm
+        self.qk_norm_eps = qk_norm_eps
         self.scaling = scaling
         if not isinstance(context_first, bool):
             raise TypeError('context_first must be a boolean')
@@ -1190,9 +1189,9 @@ class JointAttention(nn.Module):
             **projection_options,
         )
 
-        if use_qkv_norm:
+        if use_qk_norm:
             norm_options = {
-                'eps': qkv_norm_eps,
+                'eps': qk_norm_eps,
                 'dtype': dtype,
                 'axis_names': ('head_dim',),
                 'shard_mode': shard_mode,
@@ -1244,7 +1243,7 @@ class JointAttention(nn.Module):
         position_idx: jax.Array | None = None,
         out_shardings: tuple[Sharding, Sharding] | None = None,
         kernel: str = 'dot_product',
-        **kernel_kwargs: Any,
+        **kernel_kwargs: tp.Any,
     ) -> tuple[jax.Array, jax.Array]:
         """Apply joint attention and return one output per input stream."""
         x1, x2 = self._validate_inputs(x1, x2)
@@ -1324,8 +1323,8 @@ class AttentionPooling(Attention):
         *,
         num_kv_heads: int | None = None,
         bias: bool = False,
-        use_qkv_norm: bool = False,
-        qkv_norm_eps: float = 1e-5,
+        use_qk_norm: bool = False,
+        qk_norm_eps: float = 1e-5,
         dtype: DType | str | None = None,
         rngs: nn.Rngs,
         q_axis_names: AxisNames | None = None,
@@ -1349,8 +1348,8 @@ class AttentionPooling(Attention):
             head_dim,
             num_kv_heads=num_kv_heads,
             bias=bias,
-            use_qkv_norm=use_qkv_norm,
-            qkv_norm_eps=qkv_norm_eps,
+            use_qk_norm=use_qk_norm,
+            qk_norm_eps=qk_norm_eps,
             dtype=dtype,
             rngs=rngs,
             q_axis_names=q_axis_names,
@@ -1370,10 +1369,9 @@ class AttentionPooling(Attention):
         )
         self.positional_embedding = nn.Parameter(jax.random.normal(rngs(), (hidden_size,)) * jax.lax.rsqrt(float(hidden_size)))
 
-    def __call__(
+    def __call__( # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         x: jax.Array,
-        *,
         out_sharding: jax.sharding.Sharding | None = None,
         kernel: str = "dot_product",
     ) -> jax.Array:

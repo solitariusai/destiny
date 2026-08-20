@@ -17,9 +17,10 @@ from collections.abc import Sequence
 import math
 import jax
 import jax.numpy as jnp
+from jax.core import Tracer
 
 from taktiny.nn.module import Module, Parameter
-from taktiny.nn._continuo import (
+from taktiny.nn.continuo import (
     _canonical_axis,
     _canonical_axes,
     _constrain,
@@ -236,7 +237,7 @@ class RMSNorm(Module):
         normalized_shape: int | Sequence[int] | None,
         eps: float = 1e-5,
         *,
-        dtype: DType = jnp.float32,
+        dtype: DType | None = jnp.float32,
         with_scale: bool = True,
         bias: bool = False,
         axis_names: AxisNames | None = None,
@@ -302,18 +303,17 @@ class RMSNorm(Module):
                 len(self.normalized_shape),
             )
         )
+        dtype = dtype or jnp.float32
         if self.with_scale:
             self.weight = Parameter(
-                initializer(self.normalized_shape, dtype=dtype)
+                initializer(self.normalized_shape, dtype=dtype), 
+                axis_names=names
             )
-            if names is not None:
-                self.weight.axis_names = names
         if self.has_bias:
             self.bias = Parameter(
-                bias_initializer(self.normalized_shape, dtype=dtype)
+                bias_initializer(self.normalized_shape, dtype=dtype), 
+                axis_names=names
             )
-            if names is not None:
-                self.bias.axis_names = names
 
     def __call__(
         self,
@@ -470,10 +470,8 @@ class BatchNorm(Module):
         """Update stored statistics from concrete, already-computed values."""
         if not self.track_running_stats:
             raise ValueError('running statistics are disabled')
-        if isinstance(mean, jax.core.Tracer) or isinstance(
-            variance,
-            jax.core.Tracer,
-        ):
+
+        if isinstance(mean, Tracer) or isinstance(variance, Tracer):
             raise ValueError(
                 'BatchNorm running statistics cannot be mutated while tracing'
             )

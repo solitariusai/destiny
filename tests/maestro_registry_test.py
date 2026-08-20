@@ -1,5 +1,5 @@
 from taktiny import Maestro
-from taktiny.maestro._livret import repertoire
+from taktiny.maestro.livret import repertoire
 
 
 def test_registry_contains_known_architectures():

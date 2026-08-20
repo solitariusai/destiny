@@ -17,7 +17,7 @@
 from __future__ import annotations
 import typing as tp
 
-from taktiny.cosettes.transformers._ordinario import TransformerDecoderLayer
+from taktiny.cosettes.transformers.ordinario import TransformerDecoderLayer
 from taktiny import nn
 from taktiny.cosettes.layers.ffn import MoeFFN
 from taktiny.cosettes.layers import Attention

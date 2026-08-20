@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from taktiny.maestro._livret import repertoire
-from taktiny.cosettes.transformers._ordinario import TransformerCausalLM
+from taktiny.maestro.livret import repertoire
+from taktiny.cosettes.transformers.ordinario import TransformerCausalLM
 from taktiny.cosettes.transformers.gpt import GptOssDecoderLayer
 from taktiny import nn
 from taktiny.maestro.config import ModelConfig

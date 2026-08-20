@@ -21,8 +21,8 @@ import jax
 
 from taktiny.cosettes import layers as ly
 from taktiny import nn
-from taktiny.cosettes._continuo import _config_value
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.continuo import _config_value
+from taktiny.cosettes.transformers.ordinario import (
     ConditionalTransformerLayer,
 )
 from taktiny.maestro.config import ModelConfig

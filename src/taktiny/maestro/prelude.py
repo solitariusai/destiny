@@ -23,7 +23,7 @@ import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
-from taktiny.maestro._livret import repertoire
+from taktiny.maestro.livret import repertoire
 from taktiny.maestro.config import ModelConfig
 from taktiny.nn import Rngs
 from taktiny.nn.module import Module

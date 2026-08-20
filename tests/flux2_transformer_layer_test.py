@@ -10,7 +10,7 @@ from taktiny.cosettes.transformers.flux import (
     Flux2SingleTransformerLayer,
     Flux2TransformerLayer,
 )
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )

@@ -22,7 +22,7 @@ import jax, jax.numpy as jnp
 
 from taktiny.utils.typing import AxisNames, ShardMode
 from taktiny import nn
-from taktiny.nn._continuo import _constrain, _resolve_activation
+from taktiny.nn.continuo import _constrain, _resolve_activation
 from taktiny.utils.typing import Activation, DType
 
 
@@ -380,13 +380,14 @@ class MoeFFN(nn.Module):
         *,
         num_experts: int,
         num_experts_per_tok: int = 1,
-        activation: tp.Callable[[jax.Array], jax.Array] = jax.nn.silu,
+        activation: tp.Callable[[jax.Array], jax.Array] | str = jax.nn.silu,
         bias: bool = False,
-        dtype: str | None = None,
+        dtype: DType | None = None,
         rngs: nn.Rngs | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
+        router: nn.Module | None = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -397,7 +398,19 @@ class MoeFFN(nn.Module):
         self.dot_general = dot_general
         self.shard_mode = shard_mode
         
-        self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=jnp.float32, rngs=rngs, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
+        if router is None:
+            self.gate = nn.Linear(
+                hidden_size,
+                num_experts,
+                bias=False,
+                dtype=jnp.float32,
+                rngs=rngs,
+                shard_mode=shard_mode,
+                quant=quant,
+                dot_general=dot_general,
+            )
+        else:
+            self.router = router
         
         # Expert weights for GMM: [num_experts, in_features, out_features]
         rngs = rngs if rngs is not None else nn.Rngs(0)
@@ -419,16 +432,35 @@ class MoeFFN(nn.Module):
         self.w2.quantization_batch_axis_count = 1
         self.w2.axis_names = ('experts', 'mlp', 'embed')
 
+    def route(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
+        if hasattr(self, 'router'):
+            routed = self.router(x)
+            if not isinstance(routed, tuple) or len(routed) != 3:
+                raise TypeError(
+                    'router must return probabilities, weights, and indices'
+                )
+            _, routing_weights, selected_experts = routed
+            return routing_weights, selected_experts
+
+        router_logits = self.gate(x)
+        routing_weights = jax.nn.softmax(router_logits, axis=-1)
+        routing_weights, selected_experts = jax.lax.top_k(
+            routing_weights,
+            self.num_experts_per_tok,
+        )
+        routing_weights /= jnp.sum(
+            routing_weights,
+            axis=-1,
+            keepdims=True,
+        )
+        return routing_weights, selected_experts
+
     def __call__(self, x: jax.Array, out_sharding: Any = None) -> jax.Array:
         orig_shape = x.shape
         x_flat = x.reshape(-1, self.hidden_size)
         
         # 1. Routing
-        router_logits = self.gate(x_flat)
-        routing_weights = jax.nn.softmax(router_logits, axis=-1)
-        
-        routing_weights, selected_experts = jax.lax.top_k(routing_weights, self.num_experts_per_tok)
-        routing_weights /= jnp.sum(routing_weights, axis=-1, keepdims=True)
+        routing_weights, selected_experts = self.route(x_flat)
         
         # 2. Sort activations
         sorted_x, group_sizes = self.apply_route(x_flat, selected_experts, num_groups=self.num_experts)

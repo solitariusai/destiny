@@ -17,8 +17,8 @@ from __future__ import annotations
 from typing import Any
 import typing as tp
 
-from taktiny.maestro._livret import repertoire
-from taktiny.cosettes.transformers._ordinario import TransformerCausalLM, TransformerMultimodalLM
+from taktiny.maestro.livret import repertoire
+from taktiny.cosettes.transformers.ordinario import TransformerCausalLM, TransformerMultimodalLM
 from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
 from taktiny.maestro.config import ModelConfig
 from taktiny import nn

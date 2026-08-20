@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
-from taktiny.cosettes._continuo import (
+from taktiny.cosettes.continuo import (
     _config_value,
     _integer_tuple,
     _multiscales,
@@ -34,10 +34,10 @@ from taktiny.cosettes._continuo import (
     _shard_mode,
     _stage_values,
 )
-from taktiny.cosettes.autoencoders._ordinario import Autoencoder
+from taktiny.cosettes.autoencoders.ordinario import Autoencoder
 from taktiny.cosettes.layers import GLUMBConv
 from taktiny.maestro.config import ModelConfig
-from taktiny.nn._continuo import _constrain, _resolve_activation
+from taktiny.nn.continuo import _constrain, _resolve_activation
 from taktiny.utils.typing import DType, ShardMode
 
 

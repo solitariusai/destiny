@@ -358,11 +358,30 @@ def gmm(
   # Check if running on non-TPU or if M is not divisible by 128 -> fallback to reference GMM
   backend_name = jax.default_backend()
   if backend_name != "tpu" or m % 128 != 0:
+    dense_lhs = (
+        qpl.dequantize(lhs)
+        if isinstance(lhs, qpl.QArray)
+        else lhs
+    )
+    dense_rhs = (
+        qpl.dequantize(rhs)
+        if isinstance(rhs, qpl.QArray)
+        else rhs
+    )
     offsets = jnp.pad(jnp.cumsum(group_sizes), (1, 0))
     token_indices = jnp.arange(m)
     group_mask = (token_indices[:, None] >= offsets[:-1][None, :]) & (token_indices[:, None] < offsets[1:][None, :])
-    w = rhs.swapaxes(1, 2) if transpose_rhs else rhs  # [G, K, N]
-    return jnp.einsum("mg,mk,gkn->mn", group_mask.astype(lhs.dtype), lhs, w)
+    w = (
+        dense_rhs.swapaxes(1, 2)
+        if transpose_rhs
+        else dense_rhs
+    )  # [G, K, N]
+    return jnp.einsum(
+        "mg,mk,gkn->mn",
+        group_mask.astype(dense_lhs.dtype),
+        dense_lhs,
+        w,
+    )
 
   if tiling is None:
     raise ValueError(f"No tuned tiling found for (m, k, n) = ({m}, {k}, {n})")

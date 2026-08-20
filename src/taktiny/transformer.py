@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from taktiny.cosettes.transformers._ordinario import (
+from taktiny.cosettes.transformers.ordinario import (
     TransformerContext,
     TransformerCausalLM,
     TransformerMultimodalLM,
