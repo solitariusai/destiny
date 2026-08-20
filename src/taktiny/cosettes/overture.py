@@ -917,6 +917,9 @@ class PretrainedModel(nn.Module):
             raise ValueError('weights_filename must end with .safetensors')
         index_filename = f'{weights_filename}.index.json'
 
+        if sharding_rules is None:
+            sharding_rules = getattr(cls, 'default_sharding_rules', None)
+
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
         native_qwix_directory = None
@@ -1184,6 +1187,31 @@ class PretrainedModel(nn.Module):
         )
 
         stacked_states = {}
+
+        def finalize_stacked_state(k_stacked: str) -> bool:
+            stacked_state = stacked_states[k_stacked]
+            target_var = current_state_dict[k_stacked]
+            expected_indices = set(range(target_var.shape[0]))
+            if stacked_state['indices'] != expected_indices:
+                return False
+
+            if stacked_state['kind'] == 'dense':
+                axis_names = getattr(target_var, 'axis_names', None)
+                value = jax.device_put(
+                    stacked_state['value'],
+                    parameter_sharding(target_var, axis_names),
+                )
+            else:
+                value = place_qarray(
+                    stacked_state['value'],
+                    target_var,
+                )
+
+            # Complete the transfer before releasing the host assembly buffer.
+            new_state[k_stacked] = jax.block_until_ready(value)
+            del stacked_states[k_stacked]
+            return True
+
         grouped_mapping = any(
             len(rule) == 3
             and isinstance(rule[0], (list, tuple))
@@ -1294,6 +1322,11 @@ class PretrainedModel(nn.Module):
 
                                 stacked_state = stacked_states.get(k_stacked)
                                 if stacked_state is None:
+                                    if k_stacked in new_state:
+                                        raise ValueError(
+                                            'Checkpoint contains duplicate '
+                                            f'values for {k_stacked!r}'
+                                        )
                                     rule, quantization_kind = (
                                         parameter_quantization_rule(
                                             k_stacked,
@@ -1386,6 +1419,7 @@ class PretrainedModel(nn.Module):
                                         layer_value,
                                     )
                                     stacked_state['indices'].add(idx)
+                                    finalize_stacked_state(k_stacked)
                                     continue
                                 else:
                                     target_dtype = np.dtype(target_var.dtype)
@@ -1396,13 +1430,14 @@ class PretrainedModel(nn.Module):
                                         )
                                     stacked_state['value'][idx] = np.asarray(value)
                                     stacked_state['indices'].add(idx)
+                                    finalize_stacked_state(k_stacked)
                                 continue
 
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
         # Move accumulated SeqStack weights to JAX
-        for k_stacked, stacked_state in stacked_states.items():
+        for k_stacked, stacked_state in tuple(stacked_states.items()):
             target_var = current_state_dict[k_stacked]
             expected_indices = set(range(target_var.shape[0]))
             loaded_indices = stacked_state['indices']
@@ -1412,18 +1447,7 @@ class PretrainedModel(nn.Module):
                     f'Checkpoint is missing layers {missing} for '
                     f'{k_stacked!r}'
                 )
-
-            if stacked_state['kind'] == 'dense':
-                axis_names = getattr(target_var, 'axis_names', None)
-                new_state[k_stacked] = jax.device_put(
-                    stacked_state['value'],
-                    parameter_sharding(target_var, axis_names),
-                )
-            else:
-                new_state[k_stacked] = place_qarray(
-                    stacked_state['value'],
-                    target_var,
-                )
+            finalize_stacked_state(k_stacked)
 
         if not_found_some:
             print("\nSome modules from the checkpoint were not found in this model.")
