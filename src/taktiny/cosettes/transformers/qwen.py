@@ -321,7 +321,7 @@ class Qwen3Attention(Attention):
             k_bias=False,
             v_bias=False,
             o_bias=False,
-            use_qkv_norm=True,
+            use_qk_norm=True,
         )
         super().__init__(*args, **kwargs)
 

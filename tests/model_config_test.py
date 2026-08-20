@@ -5,7 +5,7 @@ import pytest
 from taktiny import nn
 from taktiny.cosettes.layers import RotaryEmbedding
 from taktiny.maestro.config import ModelConfig
-from taktiny.maestro.opus.gemma import Gemma2, Gemma3
+from taktiny.maestro.opus.gemma import Gemma2, Gemma3, Gemma4
 from taktiny.maestro.opus.llama import Llama
 from taktiny.maestro.opus.qwen import Qwen3
 from taktiny.cosettes.transformers.qwen import Qwen3DecoderLayer
@@ -182,6 +182,56 @@ def test_scanned_gemma3_matches_unrolled_local_global_attention():
     actual, _ = scanned(input_ids)
 
     assert isinstance(scanned.model.layers, nn.SeqStack)
+    assert not scanned.model.use_list
+    assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_scanned_gemma4_groups_mixed_attention_head_dimensions():
+    text_config = ModelConfig(
+        num_hidden_layers=6,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        moe_intermediate_size=8,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_global_key_value_heads=1,
+        head_dim=4,
+        global_head_dim=8,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        rope_parameters=None,
+        layer_types=[
+            'sliding_attention',
+            'sliding_attention',
+            'sliding_attention',
+            'sliding_attention',
+            'sliding_attention',
+            'full_attention',
+        ],
+        sliding_window=4,
+        rms_norm_eps=1e-6,
+        hidden_act='gelu_pytorch_tanh',
+        attention_bias=False,
+        attention_dropout=0.0,
+        mlp_bias=False,
+        query_pre_attn_scalar=4,
+        enable_moe_block=False,
+        dtype='float32',
+    )
+    config = ModelConfig(
+        text_config=text_config,
+        tie_word_embeddings=True,
+    )
+    unrolled = Gemma4(config, rngs=nn.Rngs(0), use_list=True)
+    scanned = Gemma4(config, rngs=nn.Rngs(0), use_list=False)
+    input_ids = jnp.asarray([[1, 2, 3, 4]], dtype=jnp.int32)
+
+    expected, _ = unrolled(input_ids)
+    actual, _ = scanned(input_ids)
+
+    assert isinstance(scanned.model.layers, nn.SeqStack)
+    assert scanned.model.layers.group_sizes == (5, 1)
     assert not scanned.model.use_list
     assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
 

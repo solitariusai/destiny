@@ -287,11 +287,6 @@ def _gemma4_module_map(
 
 class Gemma4(TransformerCausalLM):
     def __init__(self, config: ModelConfig, **kwargs) -> None:
-        text_config = getattr(config, 'text_config', config)
-        global_head_dim = getattr(text_config, 'global_head_dim', None)
-        head_dim = getattr(text_config, 'head_dim', None)
-        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
-            kwargs['use_list'] = True
         super().__init__(
             config,
             decoder=Gemma4DecoderLayer,
@@ -320,11 +315,6 @@ class Gemma4(TransformerCausalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
-        text_config = getattr(config, 'text_config', config)
-        global_head_dim = getattr(text_config, 'global_head_dim', None)
-        head_dim = getattr(text_config, 'head_dim', None)
-        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
-            kwargs['use_list'] = True
         rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,
@@ -370,11 +360,6 @@ class Gemma4Multimodal(TransformerMultimodalLM):
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
         config.tie_word_embeddings = True
-        text_config = getattr(config, 'text_config', config)
-        global_head_dim = getattr(text_config, 'global_head_dim', None)
-        head_dim = getattr(text_config, 'head_dim', None)
-        if global_head_dim is not None and head_dim is not None and global_head_dim != head_dim:
-            kwargs['use_list'] = True
         rules = _gemma4_module_map(config, module_map, extra_module_map)
         return super().from_pretrained(
             path_or_repo,
