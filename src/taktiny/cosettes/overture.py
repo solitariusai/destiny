@@ -955,6 +955,49 @@ class PretrainedModel(nn.Module):
 
         return self
 
+    def placement_report(self) -> str:
+        """Summarize parameter memory grouped by device placement.
+
+        Useful for diagnosing out-of-memory failures on multi-device
+        meshes: arrays whose logical axes match no sharding rule are
+        replicated (a full copy on every device), and arrays without any
+        sharding land whole on a single device, so both show up here as
+        unexpectedly large buckets.
+
+        Returns:
+            A human-readable report with one line per placement bucket and
+            a total, largest first.
+        """
+        import collections
+
+        totals: tp.Any = collections.Counter()
+        for path, leaf in jax.tree_util.tree_flatten_with_path(
+            self.flat_state_dict()
+        )[0]:
+            devices = getattr(leaf, 'devices', None)
+            if not callable(devices):
+                continue
+            resolved = tuple(sorted(str(device) for device in devices()))
+            if not resolved:
+                continue
+            key = (
+                'sharded: ' + ', '.join(resolved)
+                if len(resolved) > 1
+                else resolved[0]
+            )
+            totals[key] += int(getattr(leaf, 'nbytes', 0))
+        total = sum(totals.values())
+        lines = [
+            f'{bucket}: {size / 2 ** 30:.2f} GiB'
+            for bucket, size in sorted(
+                totals.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ]
+        lines.append(f'total: {total / 2 ** 30:.2f} GiB')
+        return '\n'.join(lines)
+
     def push_to_hub(
         self,
         repo_id: str,
@@ -1336,12 +1379,15 @@ class PretrainedModel(nn.Module):
             cpu_value = jax.device_put(value, cpu_device)
             return quantizer(cpu_value)
 
+        unsharded_warning_shown = False
+
         def parameter_sharding(
             parameter: tp.Any,
             axis_names: AxisNames | None=None,
             *,
             use_explicit: bool=True,
         ) -> tp.Any:
+            nonlocal unsharded_warning_shown
             sharding = (
                 getattr(parameter, 'sharding', None)
                 if use_explicit
@@ -1358,6 +1404,21 @@ class PretrainedModel(nn.Module):
                     mesh,
                     axis_names,
                     rules=sharding_rules,
+                )
+            if (
+                sharding is None
+                and mesh is not None
+                and not unsharded_warning_shown
+            ):
+                # Without a resolved sharding the tensor is placed whole on
+                # the first device, which can silently exhaust one GPU while
+                # the rest of the mesh stays idle.
+                unsharded_warning_shown = True
+                print(
+                    'Warning: some parameters resolve no sharding under the '
+                    'current mesh and will be placed whole on a single '
+                    'device; give them axis_names or matching '
+                    'sharding_rules to shard them across the mesh.'
                 )
             if sharding is None and mesh is None:
                 sharding = default_device

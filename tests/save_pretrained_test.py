@@ -585,6 +585,32 @@ def test_save_pretrained_module_map_argument_overrides_remembered(tmp_path):
         assert set(checkpoint.keys()) == {'proj.weight'}
 
 
+def test_placement_report_summarizes_device_bytes(tmp_path):
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    save_file(
+        {
+            'proj.weight': np.arange(
+                16,
+                dtype=np.float32,
+            ).reshape(4, 4),
+        },
+        source_dir / 'model.safetensors',
+    )
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    restored = TinyLoadableModel.from_pretrained(source_dir, config, local=True)
+    report = restored.placement_report()
+
+    assert 'total:' in report
+    assert report.splitlines()[-1].startswith('total: 0.')
+    assert len(report.splitlines()) >= 2
+
+
 def test_from_pretrained_streams_numbered_layers_into_seqstack(tmp_path):
     layer_weights = [
         np.arange(12, dtype=np.float32).reshape(3, 4),
