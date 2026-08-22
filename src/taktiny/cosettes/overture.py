@@ -227,6 +227,16 @@ class PretrainedModel(nn.Module):
     checkpoint names and may expose default logical sharding rules.
     """
 
+    @classmethod
+    def _resolve_sharding_rules(cls) -> tp.Any:
+        """Resolve the class's default logical-to-mesh sharding rules.
+
+        Architectures declare their rules under ``_default_sharding_rules``;
+        loading consults this attribute so multi-device placement uses the
+        same rules the modules were built with.
+        """
+        return getattr(cls, '_default_sharding_rules', None)
+
     @staticmethod
     def _config_as_dict(config: tp.Any) -> tp.Any:
         if config is None:
@@ -1224,7 +1234,7 @@ class PretrainedModel(nn.Module):
         )
 
         if sharding_rules is None:
-            sharding_rules = getattr(cls, 'default_sharding_rules', None)
+            sharding_rules = cls._resolve_sharding_rules()
 
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
@@ -1435,6 +1445,22 @@ class PretrainedModel(nn.Module):
                     axis_names,
                     rules=sharding_rules,
                 )
+                spec = getattr(sharding, 'spec', None)
+                if (
+                    mesh.size > 1
+                    and spec is not None
+                    and all(part is None for part in spec)
+                    and not unsharded_warning_shown
+                ):
+                    # Every axis resolved to replicated: the tensor will be
+                    # copied whole onto every device in the mesh.
+                    unsharded_warning_shown = True
+                    print(
+                        'Warning: parameters resolve no sharded axes under '
+                        'the current mesh and will be fully replicated on '
+                        'every device; check that sharding_rules cover '
+                        'their logical axis names.'
+                    )
             if (
                 sharding is None
                 and mesh is not None

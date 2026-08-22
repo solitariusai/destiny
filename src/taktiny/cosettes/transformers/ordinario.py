@@ -596,7 +596,7 @@ class DiffusionTransformerModel(PretrainedModel):
     carry and the original execution order.
     """
 
-    default_sharding_rules = (
+    _default_sharding_rules = (
         ('batch', 'fsdp'),
         ('height', None),
         ('width', None),
@@ -807,7 +807,7 @@ class DiffusionTransformerModel(PretrainedModel):
         )
 
         if sharding_rules is None:
-            sharding_rules = self.default_sharding_rules
+            sharding_rules = self._default_sharding_rules
         self.output_sharding = None
         if mesh is not None and self.shard_mode == ShardMode.EXPLICIT:
             self.output_sharding = create_sharding(
@@ -1205,7 +1205,7 @@ class TransformerMultimodalLM(PretrainedModel):
         sharding_rules: Logical-to-mesh axis mapping rules.
     """
 
-    default_sharding_rules = [
+    _default_sharding_rules = [
         ('vocab', 'tp'),
         ('embed', None),
         ('heads', 'tp'),

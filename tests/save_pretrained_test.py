@@ -585,6 +585,19 @@ def test_save_pretrained_module_map_argument_overrides_remembered(tmp_path):
         assert set(checkpoint.keys()) == {'proj.weight'}
 
 
+def test_resolve_sharding_rules_uses_private_attribute():
+    class PrivateRules(PretrainedModel):
+        _default_sharding_rules = (('vocab', 'tp'),)
+
+    class NoRules(PretrainedModel):
+        pass
+
+    assert PretrainedModel._resolve_sharding_rules() is None
+    # Causal-LM architectures declare rules under the private name; the
+    # lookup must honor it or multi-device loads silently replicate.
+    assert PrivateRules._resolve_sharding_rules() == (('vocab', 'tp'),)
+
+
 def test_placement_report_summarizes_device_bytes(tmp_path):
     source_dir = tmp_path / 'src'
     source_dir.mkdir()

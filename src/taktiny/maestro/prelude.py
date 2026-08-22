@@ -214,8 +214,11 @@ class Maestro:
             devices = mesh_utils.create_device_mesh(shape)
             mesh = Mesh(devices, axis_names)
 
-        if sharding_rules is None and hasattr(model_cls, 'default_sharding_rules'):
-            sharding_rules = model_cls.default_sharding_rules
+        if sharding_rules is None and hasattr(
+            model_cls,
+            '_default_sharding_rules',
+        ):
+            sharding_rules = model_cls._default_sharding_rules
 
         return model_cls.from_pretrained(
             repo_or_path,
@@ -289,8 +292,11 @@ class Maestro:
             devices = mesh_utils.create_device_mesh(shape)
             mesh = Mesh(devices, axis_names)
 
-        if sharding_rules is None and hasattr(model_cls, 'default_sharding_rules'):
-            sharding_rules = model_cls.default_sharding_rules
+        if sharding_rules is None and hasattr(
+            model_cls,
+            '_default_sharding_rules',
+        ):
+            sharding_rules = model_cls._default_sharding_rules
 
         rngs = kwargs.pop('rngs', None)
         if rngs is None:
