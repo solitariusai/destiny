@@ -15,7 +15,54 @@
 # limitations under the License.
 """Format utilities."""
 from __future__ import annotations
+import re
 import typing as tp
+
+
+_SIZE_SUFFIXES = {
+    'kb': 1024,
+    'mb': 1024 ** 2,
+    'gb': 1024 ** 3,
+    'tb': 1024 ** 4,
+}
+
+
+def parse_size(value: int | str) -> int:
+    """Parse a size expressed as a byte count or with a binary unit suffix.
+
+    Args:
+        value: Integer byte count, or a string such as ``"64MB"`` using
+            ``KB``, ``MB``, ``GB``, or ``TB`` suffixes. Suffixes are
+            case-insensitive and decimal magnitudes are accepted.
+
+    Returns:
+        The size expressed in bytes.
+
+    Raises:
+        ValueError: If the value cannot be interpreted as a non-negative
+            size.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f'Invalid size: {value!r}')
+    if isinstance(value, str):
+        match = re.fullmatch(
+            r'\s*(\d+(?:\.\d+)?)\s*([kKmMgGtT][bB])?\s*',
+            value,
+        )
+        if match is None:
+            raise ValueError(
+                f'Invalid size {value!r}: expected an integer byte count '
+                f'or a string using KB, MB, GB, or TB'
+            )
+        number = float(match.group(1))
+        suffix = (match.group(2) or '').lower()
+    else:
+        number = float(value)
+        suffix = ''
+    size = int(number * (_SIZE_SUFFIXES[suffix] if suffix else 1))
+    if size < 0:
+        raise ValueError(f'Size must be non-negative: {value!r}')
+    return size
 
 
 def _format_scaled(value: int | float, scale: int, suffix: str) -> str:
@@ -57,5 +104,6 @@ def format_dtype(dtype: tp.Any) -> str:
 __all__ = [
     'format_params',
     'format_bytes',
-    'format_dtype'
+    'format_dtype',
+    'parse_size',
 ]

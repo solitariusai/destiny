@@ -176,7 +176,12 @@ class Maestro:
                 precedence and the dtype becomes the fallback for unmatched
                 modules.
             **kwargs: Additional loading options forwarded to the selected
-                model, including ``subfolder`` and ``rngs``.
+                model, including ``subfolder``, ``rngs``, and
+                ``load_chunk_size``. ``load_chunk_size`` accepts an integer
+                byte count or a string such as ``"256MB"`` bounding the host
+                memory used while streaming checkpoint tensors; batching
+                tensors up to this size trades extra host memory for faster
+                materialization.
 
         Returns:
             A materialized instance of the registered Taktiny model.

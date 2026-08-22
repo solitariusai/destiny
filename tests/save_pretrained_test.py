@@ -4,6 +4,7 @@ import os
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import qwix
 from safetensors import safe_open
 from safetensors.numpy import save_file
@@ -116,6 +117,31 @@ class TinyGroupedStackedLoadableModel(PretrainedModel):
             )
             layers.append(layer)
         self.layers = nn.SeqStack(layers)
+
+
+class TinyFusedLoadableModel(PretrainedModel):
+    def __init__(
+        self,
+        config,
+        rngs,
+        mesh=None,
+        sharding_rules=None,
+    ):
+        self.config = config
+        self.attn = nn.Linear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            dtype=config.torch_dtype,
+            rngs=rngs,
+        )
+        self.mlp = nn.Linear(
+            config.hidden_size,
+            config.hidden_size,
+            bias=False,
+            dtype=config.torch_dtype,
+            rngs=rngs,
+        )
 
 
 class FakeRepoUrl:
@@ -518,6 +544,111 @@ def test_from_pretrained_quantizes_seqstack_layers_while_loading(tmp_path):
     assert weight.shape == (2, 4, 3)
     assert weight.scale.shape[0] == 2
     assert not restored.layers.stacked.proj.weight.trainable
+
+
+def test_from_pretrained_load_chunk_size_matches_unchunked(tmp_path):
+    layer_weights = [
+        np.arange(index * 12, (index + 1) * 12, dtype=np.float32).reshape(3, 4)
+        for index in range(4)
+    ]
+    save_file(
+        {
+            f'layers.{index}.proj.weight': weight
+            for index, weight in enumerate(layer_weights)
+        },
+        tmp_path / 'model.safetensors',
+    )
+    config = ModelConfig(
+        num_hidden_layers=4,
+        torch_dtype='float32',
+    )
+
+    unchunked = TinyStackedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+    )
+    chunked = TinyStackedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+        load_chunk_size=1,
+    )
+    eager = TinyStackedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+        load_chunk_size='1TB',
+    )
+    expected = np.stack(layer_weights, axis=0).transpose(0, 2, 1)
+
+    for restored in (chunked, eager):
+        np.testing.assert_array_equal(
+            restored.layers.stacked.proj.weight.value,
+            expected,
+        )
+
+
+def test_from_pretrained_chunk_keeps_fused_rule_siblings_together(tmp_path):
+    rows = [
+        np.arange(index * 3, (index + 1) * 3, dtype=np.float32).reshape(1, 3)
+        for index in range(3)
+    ]
+    mlp_weight = np.arange(9, dtype=np.float32).reshape(3, 3)
+    save_file(
+        {
+            'q_proj.weight': rows[0],
+            'mlp.weight': mlp_weight,
+            'k_proj.weight': rows[1],
+            'v_proj.weight': rows[2],
+        },
+        tmp_path / 'model.safetensors',
+    )
+    module_map = [
+        (
+            ['q_proj.weight', 'k_proj.weight', 'v_proj.weight'],
+            'attn.weight',
+            lambda *arrays: np.concatenate(arrays, axis=0),
+        ),
+    ]
+    config = ModelConfig(
+        architectures=['TinyFusedLoadableModel'],
+        hidden_size=3,
+        torch_dtype='float32',
+    )
+
+    restored = TinyFusedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+        module_map=module_map,
+        load_chunk_size=1,
+    )
+
+    np.testing.assert_array_equal(
+        restored.attn.weight.value,
+        np.concatenate(rows, axis=0).T,
+    )
+    np.testing.assert_array_equal(
+        restored.mlp.weight.value,
+        mlp_weight.T,
+    )
+
+
+def test_from_pretrained_rejects_invalid_load_chunk_size(tmp_path):
+    config = ModelConfig(
+        architectures=['TinyFusedLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    with pytest.raises(ValueError):
+        TinyFusedLoadableModel.from_pretrained(
+            tmp_path,
+            config,
+            local=True,
+            load_chunk_size='banana',
+        )
 
 
 def test_save_pretrained_finds_lora_inside_seqstack(tmp_path):

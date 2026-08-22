@@ -33,6 +33,7 @@ from safetensors.flax import save_file
 
 from taktiny import nn
 from taktiny.nn.module import iter_children
+from taktiny.utils.format import parse_size
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 
 
@@ -955,12 +956,22 @@ class PretrainedModel(nn.Module):
         sharding_rules: LogicalRules | None = None,
         allow_unmatched: bool = False,
         show_progress: bool = True,
+        load_chunk_size: int | str | None = None,
         **kwargs,
     ) -> tp.Any:
         """
         Loads Safetensors weights into a newly instantiated model. Supports
         both single-file and sharded checkpoints, including architecture-
         specific filenames selected through ``weights_filename``.
+
+        Args:
+            load_chunk_size: Peak host memory budget used while streaming
+                checkpoint tensors, expressed as an integer byte count or a
+                string such as ``"256MB"``. Tensors are decoded, name-mapped,
+                and transferred in batches up to this size instead of one at
+                a time, trading additional host memory for faster
+                materialization. ``None`` or ``0`` loads one tensor at a
+                time.
         """
         def set_config_override(name: str, value: tp.Any) -> None:
             setattr(config, name, value)
@@ -1009,6 +1020,11 @@ class PretrainedModel(nn.Module):
         if not weights_filename.endswith('.safetensors'):
             raise ValueError('weights_filename must end with .safetensors')
         index_filename = f'{weights_filename}.index.json'
+        load_chunk_bytes = (
+            parse_size(load_chunk_size)
+            if load_chunk_size is not None
+            else 0
+        )
 
         if sharding_rules is None:
             sharding_rules = getattr(cls, 'default_sharding_rules', None)
@@ -1277,7 +1293,7 @@ class PretrainedModel(nn.Module):
             )
             return rule, quantization_kind
 
-        def materialize_parameter(key: tp.Any, value: tp.Any, parameter: tp.Any) -> tp.Any:
+        def stage_parameter(key: tp.Any, value: tp.Any, parameter: tp.Any) -> tp.Any:
             rule, quantization_kind = parameter_quantization_rule(
                 key,
                 parameter,
@@ -1295,13 +1311,31 @@ class PretrainedModel(nn.Module):
             target_dtype = np.dtype(parameter.dtype)
             if value.dtype != target_dtype:
                 value = value.astype(target_dtype, copy=False)
-            return jax.device_put(
-                value,
+            # Defer the device transfer so dense parameters decoded within
+            # one chunk are placed by a single pipelined device_put call.
+            pending_keys.append(key)
+            pending_values.append(value)
+            pending_shardings.append(
                 parameter_sharding(
                     parameter,
                     getattr(parameter, 'axis_names', None),
                 ),
             )
+            return None
+
+        pending_keys: list[tp.Any] = []
+        pending_values: list[tp.Any] = []
+        pending_shardings: list[tp.Any] = []
+
+        def flush_pending_puts() -> None:
+            if not pending_values:
+                return
+            placed = jax.device_put(pending_values, pending_shardings)
+            for key, array in zip(pending_keys, placed):
+                new_state[key] = array
+            pending_keys.clear()
+            pending_values.clear()
+            pending_shardings.clear()
 
         def initialize_stacked_parameter(parameter: tp.Any) -> tp.Any:
             sharding = parameter_sharding(
@@ -1388,19 +1422,83 @@ class PretrainedModel(nn.Module):
             with safe_open(shard_path, framework="np", device="cpu") as f:
                 keys_to_process = keys_in_file if keys_in_file is not None else f.keys()
 
+                # Multi-source mapping rules (N-to-1) require their sibling
+                # tensors to be name-mapped together, so each sibling set
+                # forms an indivisible unit when the shard stream is split
+                # into chunks.
+                sibling_units: dict[str, tuple] = {}
                 if grouped_mapping:
-                    shard = {key: f.get_tensor(key) for key in keys_to_process}
-                    mapped_items = map_state_dict(shard, module_map).items()
-                else:
-                    def mapped_checkpoint_items() -> tp.Iterator[tp.Any]:
+                    key_set = set(keys_to_process)
+                    groups: list[set] = []
+                    for rule in module_map:
+                        if not (
+                            len(rule) == 3
+                            and isinstance(rule[0], (list, tuple))
+                            and len(rule[0]) > 1
+                        ):
+                            continue
+                        source_patterns = rule[0]
+                        primary_source = source_patterns[0]
                         for key in keys_to_process:
-                            yield from map_state_dict(
-                                {key: f.get_tensor(key)},
-                                module_map,
-                            ).items()
-                            progress.update(1)
+                            if primary_source not in key:
+                                continue
+                            siblings = {
+                                sibling
+                                for sibling in (
+                                    key.replace(primary_source, pattern)
+                                    for pattern in source_patterns
+                                )
+                                if sibling in key_set
+                            }
+                            if len(siblings) <= 1:
+                                continue
+                            overlapping = [
+                                group
+                                for group in groups
+                                if group & siblings
+                            ]
+                            for group in overlapping:
+                                groups.remove(group)
+                                siblings |= group
+                            groups.append(siblings)
+                    for group in groups:
+                        unit = tuple(sorted(group))
+                        for member in unit:
+                            sibling_units[member] = unit
 
-                    mapped_items = mapped_checkpoint_items()
+                def shard_chunks() -> tp.Iterator[dict]:
+                    visited = set()
+                    pending = {}
+                    pending_bytes = 0
+                    for key in keys_to_process:
+                        if key in visited:
+                            continue
+                        unit = sibling_units.get(key) or (key,)
+                        visited.update(unit)
+                        for member in unit:
+                            pending[member] = f.get_tensor(member)
+                            pending_bytes += pending[member].nbytes
+                            progress.update(1)
+                        # A zero budget emits every unit immediately,
+                        # preserving one-tensor-at-a-time loading.
+                        if (
+                            not load_chunk_bytes
+                            or pending_bytes >= load_chunk_bytes
+                        ):
+                            yield pending
+                            pending = {}
+                            pending_bytes = 0
+                    if pending:
+                        yield pending
+
+                def mapped_checkpoint_items() -> tp.Iterator[tp.Any]:
+                    for chunk in shard_chunks():
+                        yield from map_state_dict(chunk, module_map).items()
+                        # Dense parameters staged during this chunk are now
+                        # placed together through one pipelined device_put.
+                        flush_pending_puts()
+
+                mapped_items = mapped_checkpoint_items()
 
                 for k_mapped, value in mapped_items:
                     if k_mapped in current_state_dict:
@@ -1435,11 +1533,13 @@ class PretrainedModel(nn.Module):
                                     f'incompatible with parameter shape '
                                     f'{target_var.shape}'
                                 ) from error
-                        new_state[k_mapped] = materialize_parameter(
+                        placed = stage_parameter(
                             k_mapped,
                             value,
                             target_var,
                         )
+                        if placed is not None:
+                            new_state[k_mapped] = placed
 
                     else:
                         # Check if it belongs to a SeqStack
@@ -1590,9 +1690,6 @@ class PretrainedModel(nn.Module):
 
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
-
-                if grouped_mapping:
-                    progress.update(len(keys_to_process))
 
         progress.close()
 
