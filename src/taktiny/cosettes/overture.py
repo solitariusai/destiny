@@ -959,18 +959,19 @@ class PretrainedModel(nn.Module):
         """Summarize parameter memory grouped by device placement.
 
         Useful for diagnosing out-of-memory failures on multi-device
-        meshes: arrays whose logical axes match no sharding rule are
-        replicated (a full copy on every device), and arrays without any
-        sharding land whole on a single device, so both show up here as
-        unexpectedly large buckets.
+        meshes. The per-device section reports the bytes each device
+        actually holds (sharded arrays contribute their slice, replicated
+        arrays their full copy), so unbalanced placement is visible after
+        loading.
 
         Returns:
-            A human-readable report with one line per placement bucket and
-            a total, largest first.
+            A human-readable report with a per-device breakdown, logical
+            bytes grouped by placement kind, and a logical total.
         """
         import collections
 
-        totals: tp.Any = collections.Counter()
+        per_device: tp.Any = collections.Counter()
+        by_kind: tp.Any = collections.Counter()
         for path, leaf in jax.tree_util.tree_flatten_with_path(
             self.flat_state_dict()
         )[0]:
@@ -980,21 +981,50 @@ class PretrainedModel(nn.Module):
             resolved = tuple(sorted(str(device) for device in devices()))
             if not resolved:
                 continue
-            key = (
-                'sharded: ' + ', '.join(resolved)
-                if len(resolved) > 1
-                else resolved[0]
+
+            shards = getattr(leaf, 'addressable_shards', None)
+            if shards:
+                for shard in shards:
+                    per_device[str(shard.device)] += int(
+                        getattr(shard.data, 'nbytes', 0)
+                    )
+            else:
+                share = int(getattr(leaf, 'nbytes', 0)) // len(resolved)
+                for device in resolved:
+                    per_device[device] += share
+
+            spec = getattr(getattr(leaf, 'sharding', None), 'spec', None)
+            replicated = (
+                spec is not None and all(part is None for part in spec)
             )
-            totals[key] += int(getattr(leaf, 'nbytes', 0))
-        total = sum(totals.values())
-        lines = [
-            f'{bucket}: {size / 2 ** 30:.2f} GiB'
-            for bucket, size in sorted(
-                totals.items(),
+            nbytes = int(getattr(leaf, 'nbytes', 0))
+            if len(resolved) == 1:
+                kind = f'single {resolved[0]}'
+            elif replicated:
+                kind = 'replicated on: ' + ', '.join(resolved)
+            else:
+                kind = 'sharded across: ' + ', '.join(resolved)
+            by_kind[kind] += nbytes
+
+        total = sum(by_kind.values())
+        lines = ['per device:']
+        lines.extend(
+            f'  {device}: {size / 2 ** 30:.2f} GiB'
+            for device, size in sorted(
+                per_device.items(),
                 key=lambda item: item[1],
                 reverse=True,
             )
-        ]
+        )
+        lines.append('by placement (logical bytes):')
+        lines.extend(
+            f'  {kind}: {size / 2 ** 30:.2f} GiB'
+            for kind, size in sorted(
+                by_kind.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        )
         lines.append(f'total: {total / 2 ** 30:.2f} GiB')
         return '\n'.join(lines)
 

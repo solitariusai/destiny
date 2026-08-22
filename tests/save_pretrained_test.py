@@ -606,9 +606,10 @@ def test_placement_report_summarizes_device_bytes(tmp_path):
     restored = TinyLoadableModel.from_pretrained(source_dir, config, local=True)
     report = restored.placement_report()
 
+    assert 'per device:' in report
+    assert 'by placement (logical bytes):' in report
     assert 'total:' in report
     assert report.splitlines()[-1].startswith('total: 0.')
-    assert len(report.splitlines()) >= 2
 
 
 def test_from_pretrained_streams_numbered_layers_into_seqstack(tmp_path):
