@@ -181,7 +181,8 @@ class Maestro:
                 byte count or a string such as ``"256MB"`` bounding the host
                 memory used while streaming checkpoint tensors; batching
                 tensors up to this size trades extra host memory for faster
-                materialization.
+                materialization. Defaults to ``"1GB"``; pass ``None`` or
+                ``0`` to load one tensor at a time instead.
 
         Returns:
             A materialized instance of the registered Taktiny model.

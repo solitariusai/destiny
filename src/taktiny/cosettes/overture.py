@@ -956,7 +956,7 @@ class PretrainedModel(nn.Module):
         sharding_rules: LogicalRules | None = None,
         allow_unmatched: bool = False,
         show_progress: bool = True,
-        load_chunk_size: int | str | None = None,
+        load_chunk_size: int | str | None = '1GB',
         **kwargs,
     ) -> tp.Any:
         """
@@ -970,8 +970,8 @@ class PretrainedModel(nn.Module):
                 string such as ``"256MB"``. Tensors are decoded, name-mapped,
                 and transferred in batches up to this size instead of one at
                 a time, trading additional host memory for faster
-                materialization. ``None`` or ``0`` loads one tensor at a
-                time.
+                materialization. Defaults to ``"1GB"``; pass ``None`` or
+                ``0`` to load one tensor at a time instead.
         """
         def set_config_override(name: str, value: tp.Any) -> None:
             setattr(config, name, value)
