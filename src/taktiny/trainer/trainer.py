@@ -2222,10 +2222,12 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(opt_state),
                             ),
-                            # Donating averaged_grads lets XLA reuse its buffer
-                            # for the updates instead of allocating a fresh
-                            # full-size gradient tree inside the optimizer step.
-                            donate_argnums=(0, 1, 2),
+                            # Only inputs whose storage is overwritten by an
+                            # output can be recycled; params and opt_state map
+                            # 1:1 onto the outputs, while averaged_grads is
+                            # merely read, so donating it would only produce
+                            # "Some donated buffers were not usable" warnings.
+                            donate_argnums=(0, 1),
                         )
                     update_fn = (
                         compiled_optimizer_step or optimizer_step
@@ -2519,9 +2521,6 @@ class Trainer:
                         compiled = fused_cache.get(num_batches)
                         if compiled is not None:
                             return compiled
-                        donate_argnums = (0,)
-                        if self.training_config.donate_batch:
-                            donate_argnums = (0, 3)
                         compiled = jax.jit(
                             make_fused_step(num_batches),
                             in_shardings=(
@@ -2536,7 +2535,10 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 None,
                             ),
-                            donate_argnums=donate_argnums,
+                            # The accumulated-grads accumulator is overwritten
+                            # by the output; batch tensors are only read, so
+                            # donating them can never recycle their storage.
+                            donate_argnums=(0,),
                         )
                         fused_cache[num_batches] = compiled
                         return compiled
@@ -2594,9 +2596,6 @@ class Trainer:
                             compiled_gradient_step is None
                             and self.training_config.jit_compile
                         ):
-                            donate_argnums = ()
-                            if self.training_config.donate_batch:
-                                donate_argnums = (2,)
                             compiled_gradient_step = jax.jit(
                                 gradient_step,
                                 in_shardings=(
@@ -2610,7 +2609,10 @@ class Trainer:
                                     None,
                                     _tree_shardings(trainable_params),
                                 ),
-                                donate_argnums=donate_argnums,
+                                # Batch tensors are only read by the forward
+                                # pass, so no donated batch storage could
+                                # ever be recycled by an output.
+                                donate_argnums=(),
                             )
                         current_gradient_step = (
                             compiled_gradient_step or gradient_step

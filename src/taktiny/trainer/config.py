@@ -32,7 +32,6 @@ class TrainingConfig:
     log_interval: int = 10
     seed: int = 42
     jit_compile: bool = True
-    donate_batch: bool = False
     output_dir: str | PathLike | None = None
     save_steps: int | None = None
     save_total_limit: int | None = None
