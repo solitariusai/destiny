@@ -234,10 +234,10 @@ class RMSNorm(Module):
 
     def __init__(
         self,
-        normalized_shape: int | Sequence[int] | None,
-        eps: float = 1e-5,
+        shape: int | Sequence[int] | None,
+        epsilon: float = 1e-5,
         *,
-        dtype: DType | None = jnp.float32,
+        dtype: DType | None = None,
         with_scale: bool = True,
         bias: bool = False,
         axis_names: AxisNames | None = None,
@@ -248,19 +248,10 @@ class RMSNorm(Module):
     ) -> None:
         self.normalized_shape = (
             None
-            if normalized_shape is None
-            else _normalize_shape(normalized_shape, 'normalized_shape')
+            if shape is None
+            else _normalize_shape(shape, 'normalized_shape')
         )
-        self.hidden_size = (
-            None
-            if self.normalized_shape is None
-            else (
-                self.normalized_shape[0]
-                if len(self.normalized_shape) == 1
-                else self.normalized_shape
-            )
-        )
-        self.eps = _validate_positive_float(eps, 'eps')
+        self.eps = _validate_positive_float(epsilon, 'eps')
         self.with_scale = bool(with_scale)
         self.has_bias = bool(bias)
         if self.normalized_shape is None and (self.with_scale or self.has_bias):

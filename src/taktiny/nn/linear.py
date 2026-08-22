@@ -73,6 +73,7 @@ class Linear(Module):
             initializer(rngs(), weight_shape, dtype)
         )
         self.weight.quantization = quant
+        self.weight.quantization_kind = 'dot_general'
         self.weight.input_axis_count = len(in_features)
         self.weight.quantization_batch_axis_count = 0
 
@@ -181,6 +182,7 @@ class Bilinear(Module):
         )
         self.weight = Parameter(initializer(rngs(), weight_shape, dtype))
         self.weight.quantization = quant
+        self.weight.quantization_kind = 'dot_general'
         self.weight.input_axis_count = (
             len(self.in1_features) + len(self.in2_features)
         )

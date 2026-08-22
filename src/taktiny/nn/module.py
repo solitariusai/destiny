@@ -217,6 +217,9 @@ class Module:
                 if name in state:
                     child.load_state_dict(state[name])
 
+    def __call__(self, *args: tp.Any, **kwds: tp.Any) -> tp.Any:
+        pass
+
 class Parameter(Module):
     def __init__(
         self, array: PyTree, *,
@@ -226,6 +229,27 @@ class Parameter(Module):
         self.value = array
         self.trainable = trainable
         self.axis_names = axis_names
+
+    def tree_flatten(
+        self,
+    ) -> tuple[tuple[PyTree], dict[str, tp.Any]]:
+        static_data = {
+            name: value
+            for name, value in self.__dict__.items()
+            if name != 'value'
+        }
+        return (self.value,), static_data
+
+    @classmethod
+    def tree_unflatten(
+        cls,
+        aux_data: dict[str, tp.Any],
+        children: tp.Sequence[PyTree],
+    ) -> tp.Self:
+        parameter = object.__new__(cls)
+        parameter.__dict__.update(aux_data)
+        parameter.value = children[0]
+        return parameter
 
     def __repr__(self) -> str:
         return (

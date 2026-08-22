@@ -128,6 +128,18 @@ def _canonical_axes(
     return canonical
 
 
+def _identity(value: jax.Array) -> jax.Array:
+    return value
+
+
+def _relu6(value: jax.Array) -> jax.Array:
+    return jnp.minimum(jax.nn.relu(value), 6)
+
+
+def _approximate_gelu(value: jax.Array) -> jax.Array:
+    return jax.nn.gelu(value, approximate=True)
+
+
 def _resolve_activation(
     activation: Activation | None,
     *,
@@ -135,7 +147,7 @@ def _resolve_activation(
 ) -> Callable[[jax.Array], jax.Array]:
     if activation is None:
         if allow_none:
-            return lambda value: value
+            return _identity
         raise TypeError('activation must be a string or callable')
     if callable(activation):
         return activation
@@ -145,14 +157,14 @@ def _resolve_activation(
     normalized = activation.lower().replace('-', '_')
     compact = normalized.replace('_', '')
     if compact == 'relu6':
-        return lambda value: jnp.minimum(jax.nn.relu(value), 6)
+        return _relu6
     if compact in {
         'gelupytorchtanh',
         'gelunew',
         'gelufast',
         'geluapproximate',
     }:
-        return lambda value: jax.nn.gelu(value, approximate=True)
+        return _approximate_gelu
     if compact == 'swish':
         return jax.nn.silu
     function = getattr(jax.nn, normalized, None)
