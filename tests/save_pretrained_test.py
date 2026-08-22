@@ -417,6 +417,41 @@ def test_from_pretrained_recognizes_native_qwix_checkpoint(tmp_path):
     )
 
 
+def test_from_pretrained_quantized_checkpoint_stays_quantized(tmp_path):
+    """A natively quantized checkpoint reloads quantized, with or without
+    an explicit floating ``dtype`` (which only affects unquantized
+    parameters and never dequantizes stored Qwix weights)."""
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+    source = TinyLoadableModel(config, nn.Rngs(0))
+    source.proj.weight.value = qwix.quantize(
+        source.proj.weight.value,
+        'int4',
+        channelwise_axes=(1,),
+    )
+    source.save_pretrained(tmp_path)
+
+    reloaded = [
+        TinyLoadableModel.from_pretrained(tmp_path, config, local=True),
+        TinyLoadableModel.from_pretrained(
+            tmp_path,
+            config,
+            local=True,
+            dtype='bfloat16',
+        ),
+    ]
+
+    expected_qvalue = source.proj.weight.value.qvalue
+    for restored in reloaded:
+        weight = restored.proj.weight.value
+        assert isinstance(weight, qwix.QArray)
+        assert weight.qtype == 'int4'
+        np.testing.assert_array_equal(weight.qvalue, expected_qvalue)
+
+
 def test_from_pretrained_places_ptq_weights_on_default_device(tmp_path):
     save_file(
         {
@@ -447,6 +482,107 @@ def test_from_pretrained_places_ptq_weights_on_default_device(tmp_path):
         jax.devices()[0] in component.devices()
         for component in jax.tree.leaves(weight)
     )
+
+
+def test_save_pretrained_writes_original_config(tmp_path):
+    """Library overrides applied while loading (dtype/quant shortcuts) must
+    not leak into config.json; the configuration the checkpoint was loaded
+    with is what gets written back."""
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    save_file(
+        {
+            'proj.weight': np.arange(
+                16,
+                dtype=np.float32,
+            ).reshape(4, 4),
+        },
+        source_dir / 'model.safetensors',
+    )
+    original_config = {
+        'architectures': ['TinyLoadableModel'],
+        'hidden_size': 4,
+        'torch_dtype': 'bfloat16',
+        'model_type': 'tiny-test',
+    }
+
+    model = TinyLoadableModel.from_pretrained(
+        source_dir,
+        ModelConfig(**original_config),
+        local=True,
+        dtype='int4',
+    )
+    assert isinstance(model.proj.weight.value, qwix.QArray)
+    save_dir = tmp_path / 'out'
+    model.save_pretrained(save_dir)
+
+    assert (save_dir / 'quantization_config.json').is_file()
+    saved = json.loads((save_dir / 'config.json').read_text())
+    assert saved == original_config
+
+
+def test_save_pretrained_reverses_module_map_names(tmp_path):
+    """Saving restores the checkpoint's original tensor names by reversing
+    the module_map rules applied during load."""
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    weight = np.arange(16, dtype=np.float32).reshape(4, 4)
+    save_file({'block.weight': weight}, source_dir / 'model.safetensors')
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    model = TinyLoadableModel.from_pretrained(
+        source_dir,
+        config,
+        local=True,
+        module_map=[('block', 'proj')],
+    )
+    out = tmp_path / 'out'
+    model.save_pretrained(out)
+
+    with safe_open(out / 'model.safetensors', framework='np') as checkpoint:
+        assert set(checkpoint.keys()) == {'block.weight'}
+        np.testing.assert_array_equal(checkpoint.get_tensor('block.weight'), weight.T)
+
+    # The saved checkpoint reloads through the same mapping.
+    restored = TinyLoadableModel.from_pretrained(
+        out,
+        config,
+        local=True,
+        module_map=[('block', 'proj')],
+    )
+    np.testing.assert_array_equal(restored.proj.weight.value, weight)
+
+
+def test_save_pretrained_module_map_argument_overrides_remembered(tmp_path):
+    """An explicit module_map at save time wins over the one remembered
+    from from_pretrained."""
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    save_file(
+        {'block.weight': np.arange(16, dtype=np.float32).reshape(4, 4)},
+        source_dir / 'model.safetensors',
+    )
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    model = TinyLoadableModel.from_pretrained(
+        source_dir,
+        config,
+        local=True,
+        module_map=[('block', 'proj')],
+    )
+    out = tmp_path / 'out'
+    model.save_pretrained(out, module_map=[])
+
+    with safe_open(out / 'model.safetensors', framework='np') as checkpoint:
+        assert set(checkpoint.keys()) == {'proj.weight'}
 
 
 def test_from_pretrained_streams_numbered_layers_into_seqstack(tmp_path):

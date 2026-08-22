@@ -169,7 +169,10 @@ class Maestro:
             dtype: Model dtype or uniform Qwix PTQ shortcut. Floating-point
                 values select the model parameter dtype; ``"fp8"``,
                 ``"int8"``, ``"int4"``, and ``"nf4"`` quantize supported
-                parameters while loading.
+                parameters while loading. A checkpoint that was saved
+                quantized always reloads quantized; a floating ``dtype``
+                never dequantizes stored Qwix weights and only applies to
+                parameters stored unquantized.
             quant: Optional Qwix qtype string, quantization rule, PTQ provider,
                 or sequence of rules for selective weight quantization. When
                 combined with a quantized ``dtype``, explicit rules take

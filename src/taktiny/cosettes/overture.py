@@ -14,6 +14,7 @@
 from __future__ import annotations
 import typing as tp
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 import os
 import json
 import re
@@ -226,8 +227,8 @@ class PretrainedModel(nn.Module):
     checkpoint names and may expose default logical sharding rules.
     """
 
-    def _config_dict(self) -> tp.Any:
-        config = getattr(self, 'config', None)
+    @staticmethod
+    def _config_as_dict(config: tp.Any) -> tp.Any:
         if config is None:
             return {}
         if isinstance(config, dict):
@@ -240,6 +241,35 @@ class PretrainedModel(nn.Module):
             for key, value in vars(config).items()
             if not key.startswith('_')
         }
+
+    def _config_dict(self) -> tp.Any:
+        return self._config_as_dict(getattr(self, 'config', None))
+
+    def _checkpoint_config(self) -> tp.Any:
+        """Config written by ``save_pretrained``.
+
+        Models materialized through ``from_pretrained`` keep a pristine copy
+        of the configuration they were loaded with, untouched by library
+        options such as quantization shortcuts, and that original
+        configuration is what gets saved back. The only amendment is the
+        floating dtype the parameters were materialized with, so that
+        reloading casts correctly. Directly instantiated models fall back to
+        their working config.
+        """
+        original = getattr(self, 'original_config_dict', None)
+        if not (isinstance(original, dict) and original):
+            return copy.deepcopy(self._config_dict())
+        saved = copy.deepcopy(original)
+        override = getattr(self, 'loaded_dtype_override', None)
+        if override:
+            dtype_name = (
+                override
+                if isinstance(override, str)
+                else getattr(override, 'name', None) or str(override)
+            )
+            saved['torch_dtype'] = dtype_name
+            saved['dtype'] = dtype_name
+        return saved
 
     def _save_config(self, path: str) -> tp.Any:
         config_path = os.path.join(path, 'config.json')
@@ -405,18 +435,56 @@ class PretrainedModel(nn.Module):
 
     @staticmethod
     def _host_state_snapshot(state: tp.Any) -> tp.Any:
-        def copy_leaf(value: tp.Any) -> tp.Any:
-            value = jax.device_get(value)
-            if isinstance(value, np.ndarray):
+        # A single batched transfer avoids one blocking round trip per
+        # tensor on accelerator backends.
+        hosted = jax.device_get(state)
+
+        def stabilize_leaf(value: tp.Any) -> tp.Any:
+            # Fetched arrays may view device buffers that later operations
+            # can reuse, so views are copied to keep the snapshot stable.
+            if isinstance(value, np.ndarray) and not value.flags['OWNDATA']:
                 return np.array(value, copy=True)
             return value
 
-        return jax.tree.map(copy_leaf, state)
+        return jax.tree.map(stabilize_leaf, hosted)
+
+    @staticmethod
+    def _invert_checkpoint_names(state: tp.Any, module_map: tp.Any) -> tp.Any:
+        """Restore source-format checkpoint tensor names for saving.
+
+        The mapping rules applied while loading are undone in reverse order.
+        Only plain renames (two-element rules) are invertible; rules that
+        carry a transform are left exactly as they were loaded.
+        """
+        if not module_map:
+            return state
+        inverted = dict(state)
+        for rule in reversed(module_map):
+            if len(rule) != 2:
+                continue
+            source_pattern, target_pattern = rule
+            if (
+                not isinstance(source_pattern, str)
+                or not isinstance(target_pattern, str)
+                or source_pattern == target_pattern
+            ):
+                continue
+            remapped = {}
+            for key, value in inverted.items():
+                new_key = key.replace(target_pattern, source_pattern)
+                if new_key in remapped:
+                    raise ValueError(
+                        'Reversing module_map collapsed two checkpoint '
+                        f'tensors onto the same name {new_key!r}'
+                    )
+                remapped[new_key] = value
+            inverted = remapped
+        return inverted
 
     def _checkpoint_snapshot(self) -> dict[tp.Any, tp.Any]:
         """Capture stable host state for background checkpoint writing."""
         adapter_state = self._expand_stacked_state_dict(
-            self._lora_state_dict()
+            self._host_state_snapshot(self._lora_state_dict())
         )
         if adapter_state:
             peft_config = getattr(self, 'peft_config', None)
@@ -427,16 +495,26 @@ class PretrainedModel(nn.Module):
                 )
             return {
                 'kind': 'adapter',
-                'config': copy.deepcopy(self._config_dict()),
+                'config': self._checkpoint_config(),
                 'peft_config': copy.deepcopy(peft_config),
-                'state': self._host_state_snapshot(adapter_state),
+                'module_map': list(
+                    getattr(self, 'checkpoint_module_map', None) or []
+                ),
+                'state': adapter_state,
             }
 
-        state = self._expand_stacked_state_dict(self.flat_state_dict())
+        # Host tensors are fetched before stacked parameters are expanded
+        # into numbered layers so that each stacked tensor transfers once.
+        state = self._expand_stacked_state_dict(
+            self._host_state_snapshot(self.flat_state_dict())
+        )
         return {
             'kind': 'model',
-            'config': copy.deepcopy(self._config_dict()),
-            'state': self._host_state_snapshot(state),
+            'config': self._checkpoint_config(),
+            'module_map': list(
+                getattr(self, 'checkpoint_module_map', None) or []
+            ),
+            'state': state,
         }
 
     @classmethod
@@ -446,6 +524,7 @@ class PretrainedModel(nn.Module):
         path: str,
         *,
         max_shard_size: str='5GB',
+        module_map: tp.Any=None,
     ) -> tuple[tp.Any, ...]:
         os.makedirs(path, exist_ok=True)
         model_config_path = os.path.join(path, 'config.json')
@@ -457,12 +536,19 @@ class PretrainedModel(nn.Module):
                 default=str,
             )
 
+        if module_map is None:
+            module_map = snapshot.get('module_map')
+        state = cls._invert_checkpoint_names(
+            snapshot['state'],
+            module_map,
+        )
+
         if snapshot['kind'] == 'adapter':
             config_path = os.path.join(path, 'adapter_config.json')
             with open(config_path, 'w') as config_file:
                 json.dump(snapshot['peft_config'], config_file, indent=2)
             adapter_paths = cls._save_safetensors(
-                snapshot['state'],
+                state,
                 path,
                 'adapter_model.safetensors',
                 max_shard_size=max_shard_size,
@@ -474,7 +560,7 @@ class PretrainedModel(nn.Module):
             )
 
         state_dict, quantization_metadata = cls._encode_qwix_state(
-            snapshot['state']
+            state
         )
         quantization_path = os.path.join(
             path,
@@ -605,15 +691,23 @@ class PretrainedModel(nn.Module):
                 os.remove(os.path.join(path, existing_filename))
 
         saved_paths = []
-        for shard_filename, tensor_names in (
-            split.filename_to_tensors.items()
-        ):
+        shard_items = list(split.filename_to_tensors.items())
+
+        def write_shard(item: tp.Any) -> str:
+            shard_filename, tensor_names = item
             shard_path = os.path.join(path, shard_filename)
             save_file(
                 {name: state[name] for name in tensor_names},
                 shard_path,
             )
-            saved_paths.append(shard_path)
+            return shard_path
+
+        # Shards are serialized concurrently; the Rust writer releases the
+        # GIL, so large sharded checkpoints overlap disk writes.
+        workers = max(1, min(len(shard_items), 8))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for shard_path in executor.map(write_shard, shard_items):
+                saved_paths.append(shard_path)
 
         if split.is_sharded or always_write_index:
             index_path = os.path.join(
@@ -633,7 +727,12 @@ class PretrainedModel(nn.Module):
 
         return tuple(saved_paths)
 
-    def save_pretrained(self, path: str, max_shard_size: str='5GB') -> tp.Any:
+    def save_pretrained(
+        self,
+        path: str,
+        max_shard_size: str='5GB',
+        module_map: tp.Any=None,
+    ) -> tp.Any:
         """Save a full model checkpoint or the model's LoRA adapters.
 
         Models containing ``LoRALinear`` modules save only adapter tensors and
@@ -641,12 +740,19 @@ class PretrainedModel(nn.Module):
         parameter state and a Safetensors index. Parameters held by a
         ``SeqStack`` are expanded into conventional numbered layer keys.
 
+        Tensor names are restored to their source checkpoint spelling by
+        reversing the ``module_map`` rules that were applied while loading;
+        plain rename rules map back to their original names, while rules with
+        transforms cannot be inverted and keep the loaded names.
+
         Args:
             path: Directory in which to write the checkpoint.
             max_shard_size: Maximum tensor data size per Safetensors file,
                 expressed as an integer byte count or a string using ``KB``,
                 ``MB``, ``GB``, or ``TB``, such as ``"5GB"``. A tensor larger
                 than the limit is saved alone without being split.
+            module_map: Mapping rules used to restore source tensor names.
+                Defaults to the rules remembered from ``from_pretrained``.
 
         Returns:
             A tuple containing the paths written by this invocation, with
@@ -657,6 +763,7 @@ class PretrainedModel(nn.Module):
             self._checkpoint_snapshot(),
             path,
             max_shard_size=max_shard_size,
+            module_map=module_map,
         )
 
     def load_pretrained(self, path: str) -> tp.Any:
@@ -859,6 +966,7 @@ class PretrainedModel(nn.Module):
         revision: tp.Any=None,
         create_pr: bool=False,
         max_shard_size: str='5GB',
+        module_map: tp.Any=None,
     ) -> str:
         """Save and upload this model or adapter to the Hugging Face Hub.
 
@@ -878,6 +986,8 @@ class PretrainedModel(nn.Module):
             create_pr: Whether to create a pull request instead of committing
                 directly to the target revision.
             max_shard_size: Maximum size passed to ``save_pretrained``.
+            module_map: Mapping rules used to restore source tensor names;
+                defaults to the rules remembered from ``from_pretrained``.
 
         Returns:
             The URL of the created Hub commit or pull request.
@@ -907,6 +1017,7 @@ class PretrainedModel(nn.Module):
             saved_paths = self.save_pretrained(
                 temporary_directory,
                 max_shard_size=max_shard_size,
+                module_map=module_map,
             )
             filenames = {
                 os.path.basename(path)
@@ -973,6 +1084,13 @@ class PretrainedModel(nn.Module):
                 materialization. Defaults to ``"1GB"``; pass ``None`` or
                 ``0`` to load one tensor at a time instead.
         """
+        # Keep a pristine copy of the caller's configuration so that
+        # ``save_pretrained`` can write back what the model was loaded with
+        # instead of this session's library overrides.
+        original_config_dict = copy.deepcopy(
+            cls._config_as_dict(config)
+        )
+
         def set_config_override(name: str, value: tp.Any) -> None:
             setattr(config, name, value)
             text_config = vars(config).get('text_config')
@@ -980,6 +1098,7 @@ class PretrainedModel(nn.Module):
                 setattr(text_config, name, value)
 
         uniform_quant = None
+        plain_dtype_override = None
         if dtype is not None:
             dtype_name = dtype.lower() if isinstance(dtype, str) else None
             quantized_dtypes = {'fp8', 'int8', 'int4', 'nf4'}
@@ -1003,6 +1122,11 @@ class PretrainedModel(nn.Module):
             else:
                 set_config_override('dtype', dtype)
                 set_config_override('torch_dtype', dtype)
+                plain_dtype_override = (
+                    dtype
+                    if isinstance(dtype, str)
+                    else getattr(dtype, 'name', str(dtype))
+                )
         if quant is not None and uniform_quant is not None:
             from ..utils.quantization import merge_quantization
 
@@ -1126,6 +1250,11 @@ class PretrainedModel(nn.Module):
                 **kwargs,
             )
         )
+        state.original_config_dict = original_config_dict
+        state.loaded_dtype_override = plain_dtype_override
+        # Remember the name mapping used during load so that saving can
+        # restore the checkpoint's original tensor names.
+        state.checkpoint_module_map = [tuple(rule) for rule in module_map]
         if native_qwix_directory is not None:
             state.load_pretrained(native_qwix_directory)
             state.base_model_name_or_path = path_or_repo_str
