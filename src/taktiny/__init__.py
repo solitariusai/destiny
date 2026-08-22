@@ -21,6 +21,7 @@ __description__ = (
 )
 
 from taktiny.cosettes import kernels, layers
+from taktiny.cosettes.overture import ModelOutput
 from taktiny.maestro.prelude import Maestro
 from taktiny.maestro.config import ModelConfig
 from taktiny.takt import Takt
@@ -43,6 +44,7 @@ __all__ = [
     'PeftConfig',
     'LoraConfig',
     'ModelConfig',
+    'ModelOutput',
     'Trainer',
     'TrainerCallback',
     'TensorBoardCallback',

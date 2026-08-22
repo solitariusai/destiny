@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 import typing as tp
+from collections.abc import Iterator, Mapping
 import os
 import json
 import re
@@ -33,6 +34,97 @@ from safetensors.flax import save_file
 from taktiny import nn
 from taktiny.nn.module import iter_children
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
+
+
+_MISSING = object()
+
+
+@jax.tree_util.register_pytree_node_class
+class ModelOutput(Mapping[str, tp.Any]):
+    """Attribute-accessible output PyTree for model call results.
+
+    Field names are static PyTree metadata and field values are dynamic leaves.
+    Consequently, a compiled function must preserve the same output fields, but
+    their array values may change normally between calls.
+    """
+
+    __slots__ = ('_keys', '_values')
+
+    def __init__(self, **fields: tp.Any) -> None:
+        if not fields:
+            raise ValueError('ModelOutput requires at least one field')
+        invalid = [name for name in fields if not name.isidentifier()]
+        if invalid:
+            names = ', '.join(repr(name) for name in invalid)
+            raise ValueError(f'ModelOutput field names must be identifiers: {names}')
+        object.__setattr__(self, '_keys', tuple(fields))
+        object.__setattr__(self, '_values', tuple(fields.values()))
+
+    def __getitem__(self, key: str) -> tp.Any:
+        if not isinstance(key, str):
+            raise TypeError('ModelOutput keys must be strings')
+        try:
+            index = self._keys.index(key)
+        except ValueError as error:
+            raise KeyError(key) from error
+        return self._values[index]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __getattr__(self, name: str) -> tp.Any:
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+    def __setattr__(self, name: str, value: tp.Any) -> None:
+        raise AttributeError('ModelOutput fields cannot be assigned directly')
+
+    def pop(self, key: str, default: tp.Any = _MISSING) -> tp.Any:
+        """Remove ``key`` and return its value using dictionary semantics."""
+        if not isinstance(key, str):
+            raise TypeError('ModelOutput keys must be strings')
+        try:
+            index = self._keys.index(key)
+        except ValueError as error:
+            if default is _MISSING:
+                raise KeyError(key) from error
+            return default
+
+        value = self._values[index]
+        object.__setattr__(
+            self,
+            '_keys',
+            self._keys[:index] + self._keys[index + 1:],
+        )
+        object.__setattr__(
+            self,
+            '_values',
+            self._values[:index] + self._values[index + 1:],
+        )
+        return value
+
+    def tree_flatten(self) -> tuple[tuple[tp.Any, ...], tuple[str, ...]]:
+        return self._values, self._keys
+
+    @classmethod
+    def tree_unflatten(
+        cls,
+        keys: tuple[str, ...],
+        values: tuple[tp.Any, ...],
+    ) -> tp.Self:
+        return cls(**dict(zip(keys, values, strict=True)))
+
+    def __repr__(self) -> str:
+        fields = ', '.join(
+            f'{name}={value!r}'
+            for name, value in zip(self._keys, self._values, strict=True)
+        )
+        return f'{type(self).__name__}({fields})'
 
 
 def _grouped_stack_layout(
@@ -862,6 +954,7 @@ class PretrainedModel(nn.Module):
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
         allow_unmatched: bool = False,
+        show_progress: bool = True,
         **kwargs,
     ) -> tp.Any:
         """
@@ -1036,6 +1129,7 @@ class PretrainedModel(nn.Module):
             resolve_quantization_rule,
         )
         from ..utils.weights import map_state_dict
+        from ..utils.logging import is_jax_rank_zero, tqdm
 
         cpu_device = jax.devices('cpu')[0]
         default_device = jax.devices()[0]
@@ -1174,7 +1268,7 @@ class PretrainedModel(nn.Module):
             quantization_kind = getattr(
                 parameter,
                 'quantization_kind',
-                'linear',
+                'dot_general',
             )
             rule = resolve_quantization_rule(
                 quantization,
@@ -1269,6 +1363,26 @@ class PretrainedModel(nn.Module):
             for rule in module_map
         )
 
+        total_tensors = 0
+        for file_name, keys_in_file in files_to_load.items():
+            if keys_in_file is not None:
+                total_tensors += len(keys_in_file)
+                continue
+            with safe_open(
+                resolved_files[file_name],
+                framework='np',
+                device='cpu',
+            ) as checkpoint:
+                total_tensors += len(checkpoint.keys())
+
+        progress = tqdm(
+            total=total_tensors,
+            desc='Loading checkpoint',
+            unit='tensor',
+            dynamic_ncols=True,
+            disable=not show_progress or not is_jax_rank_zero(),
+        )
+
         for file_name, keys_in_file in files_to_load.items():
             shard_path = resolved_files[file_name]
             with safe_open(shard_path, framework="np", device="cpu") as f:
@@ -1278,14 +1392,15 @@ class PretrainedModel(nn.Module):
                     shard = {key: f.get_tensor(key) for key in keys_to_process}
                     mapped_items = map_state_dict(shard, module_map).items()
                 else:
-                    mapped_items = (
-                        item
-                        for key in keys_to_process
-                        for item in map_state_dict(
-                            {key: f.get_tensor(key)},
-                            module_map,
-                        ).items()
-                    )
+                    def mapped_checkpoint_items() -> tp.Iterator[tp.Any]:
+                        for key in keys_to_process:
+                            yield from map_state_dict(
+                                {key: f.get_tensor(key)},
+                                module_map,
+                            ).items()
+                            progress.update(1)
+
+                    mapped_items = mapped_checkpoint_items()
 
                 for k_mapped, value in mapped_items:
                     if k_mapped in current_state_dict:
@@ -1476,6 +1591,11 @@ class PretrainedModel(nn.Module):
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
+                if grouped_mapping:
+                    progress.update(len(keys_to_process))
+
+        progress.close()
+
         # Move accumulated SeqStack weights to JAX
         for k_stacked, stacked_state in tuple(stacked_states.items()):
             target_var = current_state_dict[k_stacked]
@@ -1515,5 +1635,6 @@ class PretrainedModel(nn.Module):
         return state
 
 __all__ = [
+    'ModelOutput',
     'PretrainedModel',
 ]
