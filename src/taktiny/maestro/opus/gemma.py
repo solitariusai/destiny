@@ -14,395 +14,331 @@
 """Gemma architectures"""
 
 from __future__ import annotations
-from typing import Any
-import typing as tp
-import jax.numpy as jnp, jax
 
+import typing as tp
+
+import jax
+import jax.numpy as jnp
+
+from taktiny import nn
+from taktiny.cosettes.layers import _RotaryEmbedding
 from taktiny.maestro.livret import repertoire
 from taktiny.cosettes.transformers.ordinario import (
+    PositionEmbedding,
+    PositionEmbeddings,
     TransformerCausalLM,
-    TransformerMultimodalLM,
-    TransformerContext
+    TransformerModel,
 )
 from taktiny.cosettes.transformers.gemma import (
-    GemmaTextScaledWordEmbedding,
-    GemmaRMSNorm,
-    GemmaDecoderLayer,
     Gemma2DecoderLayer,
-    Gemma3TextScaledWordEmbedding,
-    Gemma3RMSNorm,
     Gemma3DecoderLayer,
-    Gemma4DecoderLayer,
+    GemmaDecoderLayer,
+    GemmaRMSNorm,
+    GemmaTextScaledWordEmbedding,
 )
-from taktiny import nn
 from taktiny.maestro.config import ModelConfig
-from taktiny.utils.typing import PathLike, LogicalRules
+from taktiny.utils.typing import LogicalRules, PathLike
 
+
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹
+class GemmaModel(TransformerModel):
+    _layer_type = GemmaDecoderLayer
+    _token_embedding = GemmaTextScaledWordEmbedding
+    _norm = GemmaRMSNorm
 
 class Gemma(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        config.tie_word_embeddings = True
-        super().__init__(
-            config,
-            embedding=GemmaTextScaledWordEmbedding,
-            decoder=GemmaDecoderLayer,
-            norm=GemmaRMSNorm,
-            **kwargs
-        )
+    _model_type = GemmaModel
+    _default_config = ModelConfig(
+        vocab_size=256_000,
+        hidden_size=3072,
+        intermediate_size=24_576,
+        num_hidden_layers=28,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        head_dim=256,
+        hidden_act='gelu_pytorch_tanh',
+        max_position_embeddings=8192,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=True,
+        rope_parameters=None,
+        attention_bias=False,
+        attention_dropout=0.0,
+        use_bidirectional_attention=None,
+    )
 
-    @classmethod
-    def from_pretrained(
-        cls, path_or_repo: Any,
-        mesh: Any=None,
-        sharding_rules: Any=None,
-        local: bool=False,
-        module_map: Any = None,
-        **kwargs: Any
-    ) -> Any:
-        kwargs = dict(kwargs)
-        extra_module_map = kwargs.pop('module_map', None)
-        if 'config' in kwargs:
-            config = kwargs.pop('config')
-        else:
-            config = ModelConfig.load_config(path_or_repo, local=local)
-        if config is None:
-            raise ValueError(
-                f'Unable to load config from {path_or_repo!r} (local={local})'
-            )
-        config.tie_word_embeddings = True
-        rules = list(module_map or [])
-        if extra_module_map:
-            rules.extend(extra_module_map)
-        return super().from_pretrained(
-            path_or_repo,
-            mesh=mesh,
-            sharding_rules=sharding_rules,
-            local=local,
-            config=config,
-            module_map=rules if rules else None,
-            **kwargs,
-        )
 
-class Gemma2(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs: Any) -> None:
-        config.tie_word_embeddings = True
-        if getattr(config, 'layer_types', None) is None:
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓   ┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫   ┏━┛
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹   ┗━╸
+class Gemma2Model(GemmaModel):
+    _layer_type = Gemma2DecoderLayer
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        rngs: nn.Rngs,
+        **kwargs: tp.Any,
+    ) -> None:
+        if config.layer_types is None:
             config.layer_types = [
                 (
                     'sliding_attention'
-                    if (layer_idx + 1) % 2
+                    if layer_idx % 2 == 0
                     else 'full_attention'
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
-        super().__init__(
-            config,
-            embedding=GemmaTextScaledWordEmbedding,
-            decoder=Gemma2DecoderLayer,
-            norm=GemmaRMSNorm,
-            **kwargs
-        )
-        self.final_logit_softcapping = config.final_logit_softcapping
+        super().__init__(config, rngs=rngs, **kwargs)
 
-    def __call__(
+class Gemma2(Gemma):
+    _model_type = Gemma2Model
+    _default_config = ModelConfig(
+        vocab_size=256_000,
+        hidden_size=2304,
+        intermediate_size=9216,
+        num_hidden_layers=26,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=256,
+        hidden_activation='gelu_pytorch_tanh',
+        max_position_embeddings=8192,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=True,
+        rope_parameters=None,
+        attention_bias=False,
+        attention_dropout=0.0,
+        query_pre_attn_scalar=256,
+        sliding_window=4096,
+        layer_types=None,
+        final_logit_softcapping=30.0,
+        attn_logit_softcapping=50.0,
+        use_bidirectional_attention=None,
+    )
+    _default_module_map = [
+        *Gemma._default_module_map,
+        ('pre_feedforward_layernorm', 'norm3'),
+        ('post_feedforward_layernorm', 'norm4'),
+    ]
+
+    def _process_logits(self, logits: jax.Array) -> jax.Array:
+        if self.config.final_logit_softcapping is not None:
+            logits = logits / self.config.final_logit_softcapping
+            logits = jnp.tanh(logits)
+            logits = logits * self.config.final_logit_softcapping
+        return logits
+
+
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓   ┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫   ╺━┫
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹   ┗━┛
+class Gemma3TextModel(Gemma2Model):
+    _layer_type = Gemma3DecoderLayer
+
+    def __init__(
         self,
-        x: jax.Array,
-        attention_mask: jax.Array | None = None,
-        position_ids: jax.Array | None = None,
-        ctx: TransformerContext | None = None,
-        logits_to_keep: int = 0,
-    ) -> tuple[Any, ...]:
-        logits, ctx = super().__call__(
-            x,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            ctx=ctx,
-            logits_to_keep=logits_to_keep,
-        )
-        if self.final_logit_softcapping is not None:
-            cap = self.final_logit_softcapping
-            logits = cap * jnp.tanh(logits / cap)
-        return logits, ctx
-
-
-class Gemma3(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        if bool(getattr(config, 'use_bidirectional_attention', False)):
-            raise NotImplementedError(
-                'Gemma3 bidirectional attention is not supported'
-            )
-
-        config.tie_word_embeddings      = True
-        config.head_dim                 = config.head_dim or config.hidden_size // config.num_attention_heads
-        config.num_key_value_heads      = config.num_key_value_heads or config.num_attention_heads
-        config.rope_theta               = config.rope_theta or 1_000_000.0
-        config.rope_local_base_freq     = config.rope_local_base_freq or 10_000.0
-        config.query_pre_attn_scalar    = config.query_pre_attn_scalar or 256
-        config.attention_bias           = config.attention_bias or False
-        config.rms_norm_eps             = config.rms_norm_eps or 1e-6
+        config: ModelConfig,
+        *,
+        rngs: nn.Rngs,
+        **kwargs: tp.Any,
+    ) -> None:
+        pattern = config.sliding_window_pattern
+        if not isinstance(pattern, int) or isinstance(pattern, bool):
+            raise TypeError('sliding_window_pattern must be an integer')
+        if pattern <= 0:
+            raise ValueError('sliding_window_pattern must be positive')
 
         if config.layer_types is None:
-            pattern = config.sliding_window_pattern or 6
             config.layer_types = [
                 (
                     'sliding_attention'
-                    if (layer_idx + 1) % pattern
+                    if (index + 1) % pattern
                     else 'full_attention'
                 )
-                for layer_idx in range(config.num_hidden_layers)
+                for index in range(config.num_hidden_layers)
             ]
+        elif len(config.layer_types) != config.num_hidden_layers:
+            raise ValueError(
+                'config.layer_types must contain one entry per layer'
+            )
 
-        super().__init__(
-            config,
-            embedding=Gemma3TextScaledWordEmbedding,
-            decoder=Gemma3DecoderLayer,
-            norm=Gemma3RMSNorm,
-            **kwargs
+        default_theta = config.default_theta
+        global_theta = (
+            config.rope_theta
+            or default_theta.get('global')
         )
-        self.final_logit_softcapping = config.final_logit_softcapping
+        local_theta = (
+            config.rope_local_base_freq
+            or default_theta.local
+        )
+        rope_parameters = ModelConfig(
+            full_attention={
+                'rope_type': 'default',
+                'rope_theta': global_theta,
+            },
+            sliding_attention={
+                'rope_type': 'default',
+                'rope_theta': local_theta,
+            },
+        )
+        if config.rope_parameters is not None:
+            rope_parameters = rope_parameters.with_overrides(
+                config.rope_parameters
+            )
+        if config.rope_scaling is not None:
+            rope_parameters.full_attention = (
+                rope_parameters.full_attention.with_overrides(
+                    config.rope_scaling
+                )
+            )
+        config.rope_parameters = rope_parameters
 
-    def __call__(
+        super().__init__(config, rngs=rngs, **kwargs)
+        head_dim = (
+            config.head_dim
+            or config.hidden_size // config.num_attention_heads
+        )
+        global_rope = config.rope_parameters.full_attention
+        local_rope = config.rope_parameters.sliding_attention
+        self.rotary_embedding = _RotaryEmbedding(
+            head_dim,
+            config.max_position_embeddings,
+            base=global_rope.rope_theta,
+            rope_scaling=global_rope,
+        )
+        self.local_rotary_embedding = _RotaryEmbedding(
+            head_dim,
+            config.max_position_embeddings,
+            base=local_rope.rope_theta,
+            rope_scaling=local_rope,
+        )
+        self.sliding_pattern = tuple(
+            layer_type == 'sliding_attention'
+            for layer_type in config.layer_types
+        )
+
+    def _position_embeddings(
         self,
         x: jax.Array,
-        attention_mask: jax.Array | None = None,
-        position_ids: jax.Array | None = None,
-        ctx: TransformerContext | None = None,
-        logits_to_keep: int = 0,
-    ) -> tuple[Any, ...]:
-        logits, ctx = super().__call__(
-            x,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            ctx=ctx,
-            logits_to_keep=logits_to_keep,
+        position_ids: jax.Array | None,
+    ) -> tp.Mapping[str, PositionEmbedding]:
+        return {
+            'full_attention': self.rotary_embedding(x, position_ids),
+            'sliding_attention': self.local_rotary_embedding(x, position_ids),
+        }
+
+    def _position_embedding_for_layer(
+        self,
+        position_embeddings: PositionEmbeddings,
+        layer_idx: jax.Array,
+    ) -> PositionEmbedding:
+        if not isinstance(position_embeddings, tp.Mapping):
+            cosine, sine = position_embeddings
+            return cosine, sine
+        use_sliding = jnp.asarray(
+            self.sliding_pattern,
+            dtype=jnp.bool_,
+        )[layer_idx]
+        local = position_embeddings['sliding_attention']
+        global_ = position_embeddings['full_attention']
+        return (
+            jnp.where(use_sliding, local[0], global_[0]),
+            jnp.where(use_sliding, local[1], global_[1]),
         )
-        if self.final_logit_softcapping is not None:
-            cap = self.final_logit_softcapping
-            logits = cap * jnp.tanh(logits / cap)
-        return logits, ctx
+
+class Gemma3(Gemma2):
+    _model_type = Gemma3TextModel
+    _default_module_map = [
+        ('model.language_model.', 'model.'),
+        *Gemma2._default_module_map,
+    ]
+    _default_config = ModelConfig(
+        vocab_size=262_208,
+        hidden_size=2304,
+        intermediate_size=9216,
+        num_hidden_layers=26,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        head_dim=256,
+        hidden_activation='gelu_pytorch_tanh',
+        max_position_embeddings=131_072,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=0,
+        eos_token_id=1,
+        bos_token_id=2,
+        tie_word_embeddings=True,
+        rope_parameters=None,
+        attention_bias=False,
+        attention_dropout=0.0,
+        query_pre_attn_scalar=256,
+        sliding_window=4096,
+        sliding_window_pattern=6,
+        layer_types=None,
+        final_logit_softcapping=None,
+        attn_logit_softcapping=None,
+        use_bidirectional_attention=False,
+        default_theta={'global': 1_000_000.0, 'local': 10_000.0},
+    )
 
     @classmethod
     def from_pretrained(
         cls,
         path_or_repo: PathLike,
-        mesh: jax.sharding.Mesh | None = None,
-        sharding_rules: LogicalRules | None = None,
+        *,
+        config: ModelConfig | None = None,
         local: bool = False,
-        module_map: Any = None,
         **kwargs: tp.Any,
     ) -> tp.Self:
-        kwargs = dict(kwargs)
-        extra_module_map = kwargs.pop('module_map', None)
-        if 'config' in kwargs:
-            config = kwargs.pop('config')
-        else:
+        if config is None:
             config = ModelConfig.load_config(path_or_repo, local=local)
         if config is None:
             raise ValueError(
                 f'Unable to load config from {path_or_repo!r} (local={local})'
             )
-        config.tie_word_embeddings = True
-        rules = list(module_map or [])
-        if extra_module_map:
-            rules.extend(extra_module_map)
+        text_config = vars(config).get('text_config')
+        if text_config is not None:
+            config = text_config
         return super().from_pretrained(
             path_or_repo,
-            mesh=mesh,
-            sharding_rules=sharding_rules,
+            config=config,
             local=local,
-            config=config,
-            module_map=rules if rules else None,
             **kwargs,
         )
 
-# TODO: rewrite
-class Gemma3ConditionalGeneration(TransformerMultimodalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        language_model = TransformerCausalLM(
-            config=config,
-            decoder=Gemma3DecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-        super().__init__(
-            config,
-            language_model=language_model,
-            **kwargs,
-        )
-
-def _split_gemma4_gate_up(tensor: jax.Array) -> tuple[jax.Array, jax.Array]:
-    # The checkpoint merges w1 and w3 along the intermediate axis:
-    # (num_experts, 2 * moe_intermediate, hidden). Taktiny stores them as
-    # (num_experts, hidden, moe_intermediate), so split on axis -2 and
-    # transpose the trailing pair.
-    dim = tensor.shape[-2] // 2
-    w1 = tensor[..., :dim, :].transpose(0, 2, 1)
-    w3 = tensor[..., dim:, :].transpose(0, 2, 1)
-    return w1, w3
-
-
-def _transpose_expert_weight(tensor: jax.Array) -> jax.Array:
-    # (num_experts, hidden, moe_intermediate) -> (num_experts, moe_intermediate, hidden)
-    return tensor.transpose(0, 2, 1)
-
-
-_GEMMA4_MODULE_MAP = [
-    ('experts.gate_up_proj', ['experts.w1', 'experts.w3'], _split_gemma4_gate_up),
-    ('experts.down_proj', 'experts.w2', _transpose_expert_weight),
-    ('router.proj.weight', 'experts.router.proj.weight'),
-    ('router.scale', 'experts.router.scale'),
-    ('router.per_expert_scale', 'experts.router.per_expert_scale'),
-]
-
-
-def _gemma4_module_map(
-    config: ModelConfig,
-    module_map: tp.Any,
-    extra_module_map: tp.Any,
-) -> list[tp.Any]:
-    text_config = getattr(config, 'text_config', config)
-    enable_moe = getattr(text_config, 'enable_moe_block', False)
-    rules = [*_GEMMA4_MODULE_MAP]
-    if not enable_moe:
-        rules.append(
-            (
-                'post_feedforward_layernorm.weight',
-                'post_feedforward_layernorm_1.weight',
-            )
-        )
-    layer_types = getattr(text_config, 'layer_types', None)
-    if layer_types is not None:
-        for idx, ltype in enumerate(layer_types):
-            if ltype in ('full_attention', 'full'):
-                rules.append((
-                    f'layers.{idx}.self_attn.k_proj.weight',
-                    [f'layers.{idx}.self_attn.k_proj.weight', f'layers.{idx}.self_attn.v_proj.weight'],
-                    lambda k: (k, k),
-                ))
-    rules.extend(module_map or [])
-    if extra_module_map:
-        rules.extend(extra_module_map)
-    return rules
-
-
-class Gemma4(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=Gemma4DecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        path_or_repo: PathLike,
-        mesh: jax.sharding.Mesh | None = None,
-        sharding_rules: LogicalRules | None = None,
-        local: bool = False,
-        module_map: Any = None,
-        **kwargs: tp.Any,
-    ) -> tp.Self:
-        kwargs = dict(kwargs)
-        extra_module_map = kwargs.pop('module_map', None)
-        if 'config' in kwargs:
-            config = kwargs.pop('config')
-        else:
-            config = ModelConfig.load_config(path_or_repo, local=local)
-        if config is None:
-            raise ValueError(
-                f'Unable to load config from {path_or_repo!r} (local={local})'
-            )
-        config.tie_word_embeddings = True
-        rules = _gemma4_module_map(config, module_map, extra_module_map)
-        return super().from_pretrained(
-            path_or_repo,
-            mesh=mesh,
-            sharding_rules=sharding_rules,
-            local=local,
-            config=config,
-            module_map=rules,
-            **kwargs,
-        )
-
-
-class Gemma4Multimodal(TransformerMultimodalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        language_model = Gemma4(
-            config=config,
-            **kwargs,
-        )
-        super().__init__(
-            config,
-            language_model=language_model,
-            **kwargs,
-        )
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        path_or_repo: PathLike,
-        mesh: jax.sharding.Mesh | None = None,
-        sharding_rules: LogicalRules | None = None,
-        local: bool = False,
-        module_map: Any = None,
-        **kwargs: tp.Any,
-    ) -> tp.Self:
-        kwargs = dict(kwargs)
-        extra_module_map = kwargs.pop('module_map', None)
-        if 'config' in kwargs:
-            config = kwargs.pop('config')
-        else:
-            config = ModelConfig.load_config(path_or_repo, local=local)
-        if config is None:
-            raise ValueError(
-                f'Unable to load config from {path_or_repo!r} (local={local})'
-            )
-        config.tie_word_embeddings = True
-        rules = _gemma4_module_map(config, module_map, extra_module_map)
-        return super().from_pretrained(
-            path_or_repo,
-            mesh=mesh,
-            sharding_rules=sharding_rules,
-            local=local,
-            config=config,
-            module_map=rules,
-            **kwargs,
-        )
-
-# TODO
-class Gemma4Unified(TransformerMultimodalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        language_model = TransformerCausalLM(
-            config=config,
-            decoder=Gemma4DecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-        super().__init__(
-            config,
-            language_model=language_model,
-            **kwargs,
-        )
-
-# TODO
-class DiffusionGemma(nn.Module):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓   ╻ ╻
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫   ┗━┫
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹     ╹
+# TODO: Gemma 4
 
 class_map = [
     ('GemmaForCausalLM', Gemma),
     ('Gemma2ForCausalLM', Gemma2),
     ('Gemma3ForCausalLM', Gemma3),
-    ('Gemma3ForConditionalGeneration', Gemma3ConditionalGeneration),
-    ('Gemma4ForCausalLM', Gemma4),
-    ('Gemma4ForConditionalGeneration', Gemma4Multimodal),
-    ('Gemma4UnifiedForConditionalGeneration', Gemma4Unified),
-    ('DiffusionGemmaForBlockDiffusion', DiffusionGemma),
+    ('Gemma3ForConditionalGeneration', Gemma3),
 ]
 
-__all__ = []
 for name, cls in class_map:
     repertoire.register(name, cls)
-    __all__.append(cls.__name__)
+
+__all__ = [
+    'GemmaModel',
+    'Gemma',
+    'Gemma2Model',
+    'Gemma2',
+    'Gemma3TextModel',
+    'Gemma3',
+]

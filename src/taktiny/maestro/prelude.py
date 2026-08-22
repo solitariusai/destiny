@@ -230,6 +230,7 @@ class Maestro:
         sharding_rules: LogicalRules | None = None,
         local: bool = False,
         use_list: bool = False,
+        stack_type: tp.Literal['stack', 'list'] | None = None,
         **kwargs: tp.Any,
     ) -> Module:
         """
@@ -263,7 +264,6 @@ class Maestro:
             NotImplementedError: If the declared architecture is not
                 registered.
         """
-        kwargs = dict(kwargs)
         config_filename = kwargs.pop('config_filename', 'config.json')
         config = kwargs.pop('config', None)
         model_cls, config = Maestro._get_architecture_class(
@@ -294,6 +294,7 @@ class Maestro:
                 mesh=mesh,
                 sharding_rules=sharding_rules,
                 use_list=use_list,
+                stack_type=stack_type,
                 **kwargs,
             )
         )

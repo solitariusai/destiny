@@ -763,7 +763,7 @@ class DCDecoder(nn.Module):
         final_channels = channels[0] if layers[0] > 0 else channels[1]
         self.norm_out = nn.RMSNorm(
             final_channels,
-            eps=1e-5,
+            epsilon=1e-5,
             dtype=jnp.float32,
             bias=True,
             axis_names=('embed',),

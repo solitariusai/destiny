@@ -15,29 +15,37 @@
 # limitations under the License.
 
 from __future__ import annotations
-from typing import Any
 
+import typing as tp
 
-import jax, jax.numpy as jnp
+import jax
+import jax.numpy as jnp
 from jax.nn.initializers import normal
 
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import TransformerDecoderLayer
+from taktiny.cosettes.transformers.ordinario import (
+    TransformerDecoderLayer,
+)
 from taktiny.maestro.config import ModelConfig
-from taktiny.cosettes.layers import Attention, GateMLP, MoeFFN, RotaryEmbedding
-from taktiny.utils.typing import AxisNames, Initializer, ShardMode
+from taktiny.cosettes.layers import Attention, AttentionLegacy, GateMLP, MoEFFN
+from taktiny.utils.typing import Axes, AxisNames, DType, Initializer, ShardMode
 
 
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹
 class GemmaTextScaledWordEmbedding(nn.Embedding):
     def __init__(
-        self, num_embeddings: int,
-        embedding_dim: int, *,
-        rngs: nn.Rngs | None = None,
-        dtype: Any=jnp.float32,
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
         initializer: Initializer = normal(0.02),
-        quant: Any=None,
-        axis_names: AxisNames | None=None,
-        shard_mode: Any=ShardMode.AUTO,
+        dtype: DType = 'float32',
+        rngs: nn.Rngs | None = None,
+        quant: tp.Any = None,
+        axis_names: AxisNames | None = None,
+        shard_mode: tp.Any = ShardMode.AUTO,
     ) -> None:
         super().__init__(
             num_embeddings,
@@ -51,421 +59,162 @@ class GemmaTextScaledWordEmbedding(nn.Embedding):
         )
         self.embedding_scale = embedding_dim ** 0.5
 
-    def __call__(self, indices: jax.Array, out_sharding: Any=None) -> Any:
+    def __call__(self, indices: jax.Array, out_sharding: tp.Any = None) -> jax.Array:
         x = super().__call__(indices)
         x = x * self.embedding_scale
         if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
             x = jax.lax.with_sharding_constraint(x, out_sharding)
+
         return x
 
 
 class GemmaRMSNorm(nn.RMSNorm):
-    def __call__(self, x: Any, out_sharding: Any=None) -> Any:
-        dtype = x.dtype
-        var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        x_norm = x * jax.lax.rsqrt(var + self.eps)
-
-        if self.with_scale:
-            x_norm = x_norm * (1.0 + self.weight) # pyright: ignore[reportOperatorIssue]
-
-        if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
-            x_norm = jax.lax.with_sharding_constraint(x_norm, out_sharding)
-
-        return x_norm.astype(dtype)
-
-
-class GemmaDecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
+    def __init__(
+        self,
+        shape: int | tp.Sequence[int] | None,
+        epsilon: float = 0.00001,
+        *,
+        axes: Axes | None = None,
+        dtype: DType | None = None,
+        axis_names: AxisNames | None = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
         super().__init__(
-            config,
-            rngs=rngs,
-            layer_idx=layer_idx,
-            input_layernorm=GemmaRMSNorm,
-            self_attn=Attention,
-            post_attention_layernorm=GemmaRMSNorm,
-            mlp=GateMLP,
+            shape,
+            epsilon,
+            with_scale=False,
+            axes=axes,
+            dtype=dtype,
+            axis_names=axis_names,
+            shard_mode=shard_mode
         )
+        self.weight = nn.Parameter(jnp.zeros(shape, dtype=dtype), axis_names=axis_names)
 
-
-class Gemma2Attention(Attention):
-    """Gemma2 attention configured by the shared decoder layer."""
-
-
-class Gemma2DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
-        super().__init__(
-            config,
-            rngs=rngs,
-            layer_idx=layer_idx,
-            input_layernorm=GemmaRMSNorm,
-            self_attn=Gemma2Attention,
-            post_attention_layernorm=GemmaRMSNorm,
-            pre_feedforward_layernorm=GemmaRMSNorm,
-            mlp=GateMLP,
-            post_feedforward_layernorm=GemmaRMSNorm,
+    def __call__(self, x: jax.Array, out_sharding: tp.Any = None) -> jax.Array:
+        input_dtype = x.dtype
+        value = x.astype(jnp.float32)
+        variance = jnp.mean(
+            jnp.square(value),
+            axis=self.axes,
+            keepdims=True,
         )
-
-        # SeqStack requires identical PyTree metadata across layers. Carry the
-        # alternating local/full window as a scalar scan input instead of a
-        # static ``int | None``. A max-length window is equivalent to full
-        # causal attention for every supported input position.
-        window_size = self.self_attn.window_size
-        if window_size is None:
-            window_size = config.max_position_embeddings
-        window_size = jnp.asarray(window_size, dtype=jnp.int32)
-        self.sliding_window = window_size
-        self.self_attn.window_size = window_size
-
-
-class Gemma3TextScaledWordEmbedding(GemmaTextScaledWordEmbedding):
-    """Gemma 3 embedding with its scale rounded to the embedding dtype."""
-
-    def __call__(self, indices: jax.Array, out_sharding: Any=None) -> Any:
-        x = nn.Embedding.__call__(self, indices)
-        scale = jnp.asarray(self.embedding_scale, dtype=x.dtype)
-        x = x * scale
+        x = value * jax.lax.rsqrt(variance + self.eps)
+        x = x * (1.0 + self.weight.value.astype(value.dtype))
+        x = x.astype(input_dtype)
         if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
             x = jax.lax.with_sharding_constraint(x, out_sharding)
+
         return x
 
 
-class Gemma3RMSNorm(nn.RMSNorm):
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float=1e-6,
-        dtype: Any=jnp.float32,
-        with_scale: bool=True,
-        axis_names: AxisNames | None=None,
-        shard_mode: Any=ShardMode.AUTO,
-        initializer: Initializer=jnp.zeros,
-    ) -> None:
-        super().__init__(
-            hidden_size,
-            eps=eps,
-            dtype=dtype,
-            with_scale=with_scale,
-            axis_names=axis_names,
-            shard_mode=shard_mode,
-            initializer=initializer,
+class GemmaDecoderLayer(TransformerDecoderLayer):
+    _norm1 = GemmaRMSNorm
+    _norm2 = GemmaRMSNorm
+
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓   ┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫   ┏━┛
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹   ┗━╸
+class Gemma2DecoderLayer(GemmaDecoderLayer):
+    def __init__(self, config: ModelConfig, *, rngs: nn.Rngs, layer_idx: int | None = None, **kwargs: tp.Any) -> None:
+        query_pre_attn_scalar = config.query_pre_attn_scalar
+        _attention_kwargs = {
+            'scaling': query_pre_attn_scalar ** -0.5,
+            'softcap': config.attn_logit_softcapping,
+        }
+        self._attention_kwargs = {
+            **self._attention_kwargs,
+            **_attention_kwargs,
+        }
+        super().__init__(config, rngs=rngs, layer_idx=layer_idx, **kwargs)
+
+        self.norm3 = GemmaRMSNorm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            axis_names=config.rmsnorm_weight_axis_names,
+            shard_mode=config.shard_mode,
         )
-
-    def __call__(self, x: Any, out_sharding: Any=None) -> Any:
-        dtype = x.dtype
-        x = x.astype(jnp.float32)
-        variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        x = x * jax.lax.rsqrt(variance + self.eps)
-
-        if self.with_scale:
-            x = x * (1.0 + self.weight.value.astype(jnp.float32))
-
-        if (
-            self.shard_mode == ShardMode.EXPLICIT
-            and out_sharding is not None
-        ):
-            x = jax.lax.with_sharding_constraint(x, out_sharding)
-
-        return x.astype(dtype)
-
-
-class Gemma3Attention(Attention):
-    """Gemma 3 attention with zero-centered Q/K normalization."""
-
-    def __init__(
-        self,
-        *args: Any,
-        norm_eps: float=1e-6,
-        norm_dtype: Any=jnp.float32,
-        shard_mode: Any=ShardMode.AUTO,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, shard_mode=shard_mode, **kwargs)
-        self.q_norm = Gemma3RMSNorm(
-            self.head_dim,
-            eps=norm_eps,
-            dtype=norm_dtype,
-            axis_names=('head_dim',),
-            shard_mode=shard_mode,
-        )
-        self.k_norm = Gemma3RMSNorm(
-            self.head_dim,
-            eps=norm_eps,
-            dtype=norm_dtype,
-            axis_names=('head_dim',),
-            shard_mode=shard_mode,
-        )
-
-
-class Gemma3DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
-        if layer_idx is None:
-            raise ValueError('Gemma3DecoderLayer requires layer_idx')
-
-        shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
-        quant = getattr(config, 'quant', None)
-        dot_general = getattr(config, 'dot_general', None)
-        dtype = (
-            getattr(config, 'torch_dtype', None)
-            or getattr(config, 'dtype', None)
-            or 'bfloat16'
-        )
-        layer_types = getattr(config, 'layer_types', None)
-        if layer_types is not None and layer_idx < len(layer_types):
-            layer_type = layer_types[layer_idx]
-        else:
-            layer_type = 'full_attention'
-
-        rope_parameters = getattr(config, 'rope_parameters', None)
-        layer_rope_parameters = {}
-        if isinstance(rope_parameters, dict):
-            layer_rope_parameters = rope_parameters.get(layer_type, {}) or {}
-        elif rope_parameters is not None:
-            res = getattr(rope_parameters, layer_type, None)
-            if isinstance(res, dict):
-                layer_rope_parameters = res
-            elif isinstance(res, ModelConfig):
-                layer_rope_parameters = res.__dict__
-
-        if isinstance(layer_rope_parameters, dict):
-            rope_theta_param = layer_rope_parameters.get('rope_theta', None)
-        else:
-            rope_theta_param = getattr(layer_rope_parameters, 'rope_theta', None)
-
-        if layer_type in ('sliding_attention', 'sliding'):
-            rope_theta = (
-                rope_theta_param
-                or getattr(config, 'rope_local_base_freq', None)
-                or 10_000.0
-            )
-            sliding_window = getattr(config, 'sliding_window', 4096)
-        else:
-            rope_theta = (
-                rope_theta_param
-                or getattr(config, 'rope_theta', None)
-                or 1_000_000.0
-            )
-            sliding_window = None
-
-        attention = Gemma3Attention(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            head_dim=config.head_dim,
-            num_kv_heads=config.num_key_value_heads,
-            pos_emb=RotaryEmbedding(
-                config.head_dim,
-                config.max_position_embeddings,
-                rope_theta,
-            ),
-            bias=False,
-            q_bias=bool(config.attention_bias),
-            k_bias=bool(config.attention_bias),
-            v_bias=bool(config.attention_bias),
-            o_bias=bool(config.attention_bias),
-            dtype=dtype,
-            rngs=rngs,
-            q_axis_names=('embed', 'heads', 'head_dim'),
-            k_axis_names=('embed', 'kv_heads', 'head_dim'),
-            v_axis_names=('embed', 'kv_heads', 'head_dim'),
-            o_axis_names=('heads', 'head_dim', 'embed'),
-            window_size=sliding_window,
-            scaling=(getattr(config, 'query_pre_attn_scalar', None) or getattr(config, 'head_dim', None) or 256) ** -0.5,
-            softcap=getattr(config, 'attn_logit_softcapping', None),
-            dropout=getattr(config, 'attention_dropout', None) or 0.0,
-            norm_eps=getattr(config, 'rms_norm_eps', None) or 1e-6,
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general,
-        )
-
-        super().__init__(
-            config,
-            rngs=rngs,
-            layer_idx=layer_idx,
-            input_layernorm=Gemma3RMSNorm,
-            self_attn=attention,
-            post_attention_layernorm=Gemma3RMSNorm,
-            pre_feedforward_layernorm=Gemma3RMSNorm,
-            mlp=GateMLP,
-            post_feedforward_layernorm=Gemma3RMSNorm,
-        )
-
-        # Gemma 3 alternates local and global attention, including distinct
-        # RoPE bases. Keep those per-layer values as scan leaves so every
-        # layer has the same PyTree structure in SeqStack.
-        window_size = self.self_attn.window_size
-        if window_size is None:
-            window_size = config.max_position_embeddings
-        window_size = jnp.asarray(window_size, dtype=jnp.int32)
-        rope_base = jnp.asarray(self.self_attn.pos_emb.base, dtype=jnp.float32)
-
-        self.sliding_window = window_size
-        self.self_attn.window_size = window_size
-        self.self_attn.pos_emb.base = rope_base
-
-
-class Gemma4Router(nn.Module):
-    """Gemma 4 normalized top-k expert router."""
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_experts: int,
-        num_experts_per_tok: int,
-        *,
-        eps: float = 1e-6,
-        dtype: Any = jnp.bfloat16,
-        rngs: nn.Rngs,
-        shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any = None,
-        dot_general: Any = None,
-    ) -> None:
-        self.num_experts_per_tok = num_experts_per_tok
-        self.scalar_root_size = hidden_size ** -0.5
-        self.norm = nn.RMSNorm(
-            hidden_size,
-            eps=eps,
-            with_scale=False,
-            shard_mode=shard_mode,
-        )
-        self.proj = nn.Linear(
-            hidden_size,
-            num_experts,
-            bias=False,
-            dtype=dtype,
-            rngs=rngs,
-            axis_names=('embed', 'experts'),
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general,
-        )
-        self.scale = nn.Parameter(
-            jnp.ones((hidden_size,), dtype=dtype),
-            axis_names=('embed',),
-        )
-        self.per_expert_scale = nn.Parameter(
-            jnp.ones((num_experts,), dtype=dtype),
-            axis_names=('experts',),
+        self.norm4 = GemmaRMSNorm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            axis_names=config.rmsnorm_weight_axis_names,
+            shard_mode=config.shard_mode,
         )
 
     def __call__(
         self,
-        hidden_states: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        hidden_states = self.norm(hidden_states)
-        hidden_states = (
-            hidden_states
-            * self.scale.value.astype(hidden_states.dtype)
-            * jnp.asarray(self.scalar_root_size, dtype=hidden_states.dtype)
+        x: jax.Array,
+        attention_mask: jax.Array | None = None,
+        is_causal: bool = False,
+        kv_cache: tp.Tuple[jax.Array, jax.Array] | None = None,
+        cache_position: jax.Array | None = None,
+        position_ids: jax.Array | None = None,
+        position_embedding: tuple[jax.Array, jax.Array] | None = None,
+        boundary_ids: jax.Array | None = None,
+        kernel: str = 'dot_product',
+        out_sharding: tp.Any = None,
+        **kwargs: tp.Any,
+    ) -> tp.Tuple[
+        jax.Array,
+        tp.Tuple[jax.Array, jax.Array] | None,
+    ]:
+        z = x
+        x, updated_cache = self.attention(
+            self.norm1(x, out_sharding=out_sharding),
+            attention_mask=attention_mask,
+            is_causal=is_causal,
+            kv_cache=kv_cache,
+            position_ids=position_ids,
+            cache_position=cache_position,
+            position_embedding=position_embedding,
+            boundary_ids=boundary_ids,
+            use_sliding_window=self.use_sliding_window,
+            kernel=kernel,
+            out_sharding=out_sharding
         )
-        expert_scores = self.proj(hidden_states)
-        probabilities = jax.nn.softmax(
-            expert_scores.astype(jnp.float32),
-            axis=-1,
+        x = self.norm2(x, out_sharding=out_sharding) + z
+        z = x
+        x = self.ffn(
+            self.norm3(x, out_sharding=out_sharding),
+            out_sharding=out_sharding
         )
-        weights, indices = jax.lax.top_k(
-            probabilities,
-            self.num_experts_per_tok,
+        x = self.norm4(x, out_sharding=out_sharding) + z
+        return x, updated_cache
+
+# ┏━╸┏━╸┏┳┓┏┳┓┏━┓   ┏━┓
+# ┃╺┓┣╸ ┃┃┃┃┃┃┣━┫   ╺━┫
+# ┗━┛┗━╸╹ ╹╹ ╹╹ ╹   ┗━┛
+class Gemma3DecoderLayer(Gemma2DecoderLayer):
+    def __init__(self, config: ModelConfig, *, rngs: nn.Rngs, layer_idx: int | None = None, **kwargs: tp.Any) -> None:
+        head_dim = (
+            config.head_dim
+            or config.hidden_size // config.num_attention_heads
         )
-        weights /= jnp.sum(weights, axis=-1, keepdims=True)
-        weights *= self.per_expert_scale.value[indices].astype(weights.dtype)
-        return probabilities, weights, indices
-
-
-class Gemma4MoeFFN(MoeFFN):
-    """Gemma 4 experts using its learned normalized router."""
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        *,
-        num_experts: int,
-        num_experts_per_tok: int = 1,
-        activation: Any = jax.nn.silu,
-        bias: bool = False,
-        dtype: Any = None,
-        rngs: nn.Rngs | None = None,
-        shard_mode: ShardMode = ShardMode.AUTO,
-        quant: Any = None,
-        dot_general: Any = None,
-    ) -> None:
-        if rngs is None:
-            rngs = nn.Rngs(0)
-        router = Gemma4Router(
-            hidden_size,
-            num_experts,
-            num_experts_per_tok,
-            dtype=dtype or jnp.bfloat16,
-            rngs=rngs,
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general,
+        q_norm = GemmaRMSNorm(
+            head_dim,
+            config.rms_norm_eps,
+            axis_names=config.attention_q_proj_axis_names[-1:],
+            shard_mode=config.shard_mode,
         )
-        super().__init__(
-            hidden_size,
-            intermediate_size,
-            num_experts=num_experts,
-            num_experts_per_tok=num_experts_per_tok,
-            activation=activation,
-            bias=bias,
-            dtype=dtype,
-            rngs=rngs,
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general,
-            router=router,
+        k_norm = GemmaRMSNorm(
+            head_dim,
+            config.rms_norm_eps,
+            axis_names=config.attention_k_proj_axis_names[-1:],
+            shard_mode=config.shard_mode,
         )
-
-
-class Gemma4DecoderLayer(TransformerDecoderLayer):
-    """Gemma 4 Decoder Layer with parallel Dense MLP and Sparse MoE branches."""
-
-    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None = None) -> None:
-        text_config = getattr(config, 'text_config', config)
-        enable_moe = getattr(text_config, 'enable_moe_block', False)
-
-        modules = {
-            'input_layernorm': Gemma3RMSNorm,
-            'self_attn': Gemma3Attention,
-            'post_attention_layernorm': Gemma3RMSNorm,
-            'pre_feedforward_layernorm': Gemma3RMSNorm,
-            'mlp': GateMLP,
-            'post_feedforward_layernorm_1': Gemma3RMSNorm,
+        _attention_kwargs = {
+            'q_norm': q_norm,
+            'k_norm': k_norm,
         }
-        if enable_moe:
-            modules.update({
-                'pre_feedforward_layernorm_2': Gemma3RMSNorm,
-                'experts': Gemma4MoeFFN,
-                'post_feedforward_layernorm_2': Gemma3RMSNorm,
-                # Final norm applied after combining the dense MLP and experts
-                # branches (the checkpoint's post_feedforward_layernorm).
-                'post_feedforward_layernorm': Gemma3RMSNorm,
-            })
-
-        super().__init__(
-            config,
-            rngs=rngs,
-            layer_idx=layer_idx,
-            **modules,
-        )
-
-        self.layer_scalar = nn.Parameter(
-            jnp.ones((), dtype=self.dtype if self.dtype is not None else jnp.bfloat16)
-        )
-
-
-
+        self._attention_kwargs = {
+            **self._attention_kwargs,
+            **_attention_kwargs,
+        }
+        super().__init__(config, rngs=rngs, layer_idx=layer_idx, **kwargs)
+        del self._attention_kwargs
 __all__ = [
     'GemmaTextScaledWordEmbedding',
     'GemmaRMSNorm',
     'GemmaDecoderLayer',
-    'Gemma2Attention',
     'Gemma2DecoderLayer',
-    'Gemma3TextScaledWordEmbedding',
-    'Gemma3RMSNorm',
-    'Gemma3Attention',
     'Gemma3DecoderLayer',
-    'Gemma4Router',
-    'Gemma4MoeFFN',
-    'Gemma4DecoderLayer',
 ]

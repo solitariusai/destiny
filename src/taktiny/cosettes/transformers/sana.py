@@ -15,7 +15,7 @@ from taktiny.cosettes.transformers.ordinario import (
 from taktiny.maestro.config import ModelConfig
 
 
-class SanaLinearAttention(ly.Attention):
+class SanaLinearAttention(ly.AttentionLegacy):
     """Sana's ReLU feature-map linear self-attention."""
 
     def __call__(
@@ -80,7 +80,7 @@ class SanaTransformerLayer(ConditionalTransformerLayer):
             layer_idx=layer_idx,
             input_layernorm=nn.LayerNorm,
             self_attention=SanaLinearAttention,
-            cross_attention=ly.Attention,
+            cross_attention=ly.AttentionLegacy,
             post_attention_layernorm=nn.LayerNorm,
             mlp=ly.GLUMBConv,
         )

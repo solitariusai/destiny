@@ -14,6 +14,7 @@
 from __future__ import annotations
 import typing as tp
 from pathlib import Path
+import warnings
 from huggingface_hub import hf_hub_download
 import json
 from taktiny.utils.typing import PathLike
@@ -62,6 +63,43 @@ class ModelConfig:
             else:
                 output[k] = v
         return output
+
+    def with_overrides(self, overrides: ModelConfig) -> ModelConfig:
+        """Return a new config with ``overrides`` layered over this config.
+
+        Nested configuration dictionaries are merged recursively. Neither the
+        defaults nor the overrides are mutated, so class-level default configs
+        remain reusable across model instances.
+        """
+        if not isinstance(overrides, ModelConfig):
+            raise TypeError('overrides must be a ModelConfig')
+
+        def clone(value: tp.Any) -> tp.Any:
+            if isinstance(value, dict):
+                return {key: clone(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [clone(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(clone(item) for item in value)
+            return value
+
+        def merge(
+            defaults: dict[str, tp.Any],
+            supplied: dict[str, tp.Any],
+        ) -> dict[str, tp.Any]:
+            result = clone(defaults)
+            for key, value in supplied.items():
+                if (
+                    key in result
+                    and isinstance(result[key], dict)
+                    and isinstance(value, dict)
+                ):
+                    result[key] = merge(result[key], value)
+                else:
+                    result[key] = clone(value)
+            return result
+
+        return ModelConfig(**merge(self.to_dict(), overrides.to_dict()))
 
     def get(self, key: tp.Any, default: tp.Any=None) -> tp.Any:
         """Return a configuration value using mapping-style semantics."""
@@ -114,3 +152,24 @@ class ModelConfig:
         return f"{self.__class__.__name__} {config_str}"
 
 __all__ = ['ModelConfig']
+
+
+def _validate_dtype_config(config: ModelConfig):
+    dtype = config.dtype or config.torch_dtype
+    if dtype is None:
+        import warnings
+        warnings.warn('Not found `dtype` or `torch_dtype` in model config fallback to float32')
+        dtype = 'float32'
+    return dtype
+
+
+def _verify_required_config_attributes(config: ModelConfig, config_attributes: tp.Sequence[str] | None) -> None:
+    missing = []
+    if config_attributes is None:
+        return
+
+    for attr in config_attributes:
+        if not hasattr(config, attr):
+            missing.append(attr)
+    if len(missing) > 0:
+        raise ValueError(f'Missing config attributes: {', '.join(missing)}.')

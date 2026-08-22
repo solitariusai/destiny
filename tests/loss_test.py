@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from taktiny.cosettes.transformers.ordinario import TransformerContext
 from taktiny.trainer.loss import (
     Loss,
     causal_lm_loss,
@@ -29,15 +28,17 @@ class FixedLogitModel:
         *,
         attention_mask=None,
         position_ids=None,
-        ctx=None,
+        is_causal=False,
+        kernel='dot_product',
     ):
         self.call = {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
             'position_ids': position_ids,
-            'ctx': ctx,
+            'is_causal': is_causal,
+            'kernel': kernel,
         }
-        return self.logits, ctx
+        return self.logits
 
 
 def test_loss_preserves_standard_model_batch_contract_by_default():
@@ -129,8 +130,8 @@ def test_causal_lm_loss_shifts_labels_and_excludes_position_resets():
         model.call['position_ids'],
         batch['position_ids'],
     )
-    assert isinstance(model.call['ctx'], TransformerContext)
-    assert model.call['ctx'].is_causal is True
+    assert model.call['is_causal'] is True
+    assert model.call['kernel'] == 'dot_product'
 
 
 def test_causal_lm_loss_converts_padding_mask_for_attention():
@@ -184,7 +185,7 @@ def _tiny_llama():
         rms_norm_eps=1e-5,
         dtype='float32',
     )
-    return Llama(config, rngs=nn.Rngs(0), use_list=False)
+    return Llama(config, rngs=nn.Rngs(0), stack_type='stack')
 
 
 @pytest.mark.parametrize('logits_chunk_size', [1, 3, 7, 32, 100])

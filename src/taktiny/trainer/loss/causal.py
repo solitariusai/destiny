@@ -19,8 +19,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import jax.numpy as jnp
-
-from taktiny.cosettes.transformers.ordinario import TransformerContext
 from taktiny.utils.typing import Array, Batch
 
 from .classification import cross_entropy_loss
@@ -112,18 +110,12 @@ def causal_lm_loss(
             attention_kernel=attention_kernel,
         )
 
-    ctx = TransformerContext(
-        key_cache=None,
-        value_cache=None,
-        position_idx=None,
-        is_causal=True,
-        attention_kernel=attention_kernel,
-    )
     outputs = model(
         input_ids,
         attention_mask=attention_mask,
         position_ids=position_ids,
-        ctx=ctx,
+        is_causal=True,
+        kernel=attention_kernel,
     )
     logits = outputs[0] if isinstance(outputs, tuple) else outputs
     if hasattr(logits, 'logits'):

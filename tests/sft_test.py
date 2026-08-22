@@ -117,7 +117,7 @@ def test_sft_trainer_end_to_end_causal_loss():
         rms_norm_eps=1e-5,
         dtype='float32',
     )
-    model = Llama(config, rngs=nn.Rngs(0), use_list=False)
+    model = Llama(config, rngs=nn.Rngs(0), stack_type='stack')
 
     trainer = SFTTrainer(
         model,
@@ -140,7 +140,7 @@ def test_sft_trainer_end_to_end_causal_loss():
 
     trainer.train()
 
-    embedding = model.model.embed_tokens.embedding.value
+    embedding = model.model.token_embedding.embedding.value
     assert bool(jnp.all(jnp.isfinite(jnp.asarray(embedding))))
 
 

@@ -81,33 +81,56 @@ def _parameter_labels(params: PyTree) -> PyTree:
 
 
 def _partition_params(params: PyTree, labels: PyTree) -> tuple[PyTree, PyTree]:
+    def label_value(label: PyTree) -> PyTree:
+        return label.value if isinstance(label, Parameter) else label
+
+    def empty_value(value: PyTree) -> PyTree:
+        if isinstance(value, Parameter):
+            empty = object.__new__(type(value))
+            empty.__dict__.update(value.__dict__)
+            empty.value = None
+            return empty
+        return None
+
     trainable = jax.tree.map(
         lambda value, label: (
-            value if label == 'trainable' else None
+            value
+            if label_value(label) == 'trainable'
+            else empty_value(value)
         ),
         params,
         labels,
+        is_leaf=lambda value: isinstance(value, Parameter),
     )
     frozen = jax.tree.map(
         lambda value, label: (
-            None if label == 'trainable' else value
+            empty_value(value)
+            if label_value(label) == 'trainable'
+            else value
         ),
         params,
         labels,
+        is_leaf=lambda value: isinstance(value, Parameter),
     )
     return trainable, frozen
 
 
 def _combine_params(trainable: PyTree, frozen: PyTree) -> PyTree:
+    def combine_value(
+        trainable_value: PyTree,
+        frozen_value: PyTree,
+    ) -> PyTree:
+        if isinstance(trainable_value, Parameter):
+            if trainable_value.value is None:
+                return frozen_value
+            return trainable_value
+        return frozen_value if trainable_value is None else trainable_value
+
     return jax.tree.map(
-        lambda trainable_value, frozen_value: (
-            frozen_value
-            if trainable_value is None
-            else trainable_value
-        ),
+        combine_value,
         trainable,
         frozen,
-        is_leaf=lambda value: value is None,
+        is_leaf=lambda value: value is None or isinstance(value, Parameter),
     )
 
 

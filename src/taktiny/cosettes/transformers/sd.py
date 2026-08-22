@@ -48,7 +48,7 @@ class SD3TransformerLayer(JointTransformerLayer):
             input_layernorm=ly.AdaXNorm,
             context_input_layernorm=ly.AdaXNorm,
             joint_attention=ly.JointAttention,
-            second_attention=ly.Attention,
+            second_attention=ly.AttentionLegacy,
             post_attention_layernorm=nn.LayerNorm,
             context_post_attention_layernorm=nn.LayerNorm,
             mlp=ly.FeedForward,

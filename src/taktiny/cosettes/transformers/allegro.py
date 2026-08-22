@@ -49,8 +49,8 @@ class AllegroTransformerLayer(ConditionalTransformerLayer):
             attention_bias=attention_bias,
             cross_attention_bias=attention_bias,
             input_layernorm=nn.LayerNorm,
-            self_attention=ly.Attention,
-            cross_attention=ly.Attention,
+            self_attention=ly.AttentionLegacy,
+            cross_attention=ly.AttentionLegacy,
             post_attention_layernorm=nn.LayerNorm,
             mlp=ly.FeedForward,
         )

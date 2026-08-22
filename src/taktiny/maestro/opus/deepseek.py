@@ -16,71 +16,11 @@ from __future__ import annotations
 import typing as tp
 
 from taktiny.maestro.livret import repertoire
-from taktiny.cosettes.transformers.ordinario import TransformerCausalLM
-from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
-from taktiny.maestro.config import ModelConfig
-from taktiny import nn
 
 
+# ╺┳┓┏━╸┏━╸┏━┓┏━┓┏━╸┏━╸╻┏ 
+#  ┃┃┣╸ ┣╸ ┣━┛┗━┓┣╸ ┣╸ ┣┻┓
+# ╺┻┛┗━╸┗━╸╹  ┗━┛┗━╸┗━╸╹ ╹
 # TODO: Deepseek
-class Deepseek(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=LlamaDecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-# TODO: DeepseekV2
-class DeepseekV2(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=LlamaDecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-# TODO: DeepseekV3
-class DeepseekV3(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=LlamaDecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-# TODO: DeepseekV3_2
-class DeepseekV3_2(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=LlamaDecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-# TODO: DeepseekV4
-class DeepseekV4(TransformerCausalLM):
-    def __init__(self, config: ModelConfig, **kwargs) -> None:
-        super().__init__(
-            config,
-            decoder=LlamaDecoderLayer,
-            norm=nn.RMSNorm,
-            **kwargs,
-        )
-
-class_map = [
-    ('DeepseekForCausalLM', Deepseek),
-    ('DeepseekV2ForCausalLM', DeepseekV2),
-    ('DeepseekV3ForCausalLM', DeepseekV3),
-    ('DeepseekV32ForCausalLM', DeepseekV3_2),
-    ('DeepseekV4ForCausalLM', DeepseekV4),
-]
 
 __all__ = []
-for name, cls in class_map:
-    repertoire.register(name, cls)
-    __all__.append(cls.__name__)

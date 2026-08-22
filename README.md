@@ -95,11 +95,15 @@ model = Maestro.from_pretrained(
 )
 ```
 
-For a uniform weight-only format, `dtype="int8"` and `dtype="int4"` remain
-shortcuts. The quantized dtype describes linear-weight and embedding-table
-storage. Activations, quantization scales, and operation outputs remain BF16
-by default, while Qwix selects the available dot implementation for the
-quantized operands.
+For a convenient weight-only format, use `quant="int8"` or `quant="int4"`;
+the legacy quantized `dtype` values remain equivalent shortcuts. They quantize
+linear weights while keeping embedding tables and tied output heads dense. The
+4-bit shortcuts use groups of 128 input values to avoid the large cumulative
+error of whole-channel quantization.
+Activations, quantization scales, and operation outputs remain BF16 by
+default, while Qwix selects the available dot implementation for quantized
+operands. Use an explicit Qwix rule when embedding quantization or another
+group size is intentional.
 
 The shortcut can be combined with explicit rules. Explicit rules are checked
 first, and the dtype is used as the fallback for unmatched modules:

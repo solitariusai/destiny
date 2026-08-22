@@ -380,8 +380,8 @@ class LongCatAudioTransformerLayer(ConditionalTransformerLayer):
             pos_emb=self.audio_position_embedding,
             cross_pos_emb=None,
             input_layernorm=nn.LayerNorm,
-            self_attention=ly.Attention,
-            cross_attention=(ly.Attention if self.use_cross_attention else None),
+            self_attention=ly.AttentionLegacy,
+            cross_attention=(ly.AttentionLegacy if self.use_cross_attention else None),
             cross_attention_layernorm=cross_input_norm,
             post_attention_layernorm=nn.LayerNorm,
             mlp=ly.FeedForward,
@@ -496,7 +496,7 @@ class LongCatAudioTransformerLayer(ConditionalTransformerLayer):
             key,
             encoder_position_idx,
         )
-        output = ly.Attention.apply(
+        output = ly.AttentionLegacy.apply(
             query,
             key,
             value,
