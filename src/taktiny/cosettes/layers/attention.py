@@ -73,7 +73,7 @@ class _AcrossHeadsRMSNorm(nn.Module):
         return (value * weight.astype(value.dtype)).astype(input_dtype)
 
 
-class Attention(nn.Module):
+class AttentionLegacy(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -173,7 +173,7 @@ class Attention(nn.Module):
                 if self.qk_norm_across_heads
                 else nn.RMSNorm(
                     self.head_dim,
-                    eps=self.qk_norm_eps,
+                    epsilon=self.qk_norm_eps,
                     dtype=dtype,
                     axis_names=('head_dim',),
                     shard_mode=shard_mode,
@@ -191,7 +191,7 @@ class Attention(nn.Module):
                 if self.qk_norm_across_heads
                 else nn.RMSNorm(
                     self.head_dim,
-                    eps=self.qk_norm_eps,
+                    epsilon=self.qk_norm_eps,
                     dtype=dtype,
                     axis_names=('head_dim',),
                     shard_mode=shard_mode,
@@ -1092,6 +1092,576 @@ class Attention(nn.Module):
         return out, None
 
 
+class Attention(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        *,
+        num_kv_heads: int | None = None,
+        context_dim: int | None = None,
+        apply_position_fn: tp.Callable | None = None,
+        bias: bool | tp.Sequence[bool] = False,
+        q_norm: bool | nn.Module = False,
+        k_norm: bool | nn.Module = False,
+        qk_norm: bool = False,
+        qk_norm_across_heads: bool | tp.Sequence[bool] = False,
+        epsilon: float = 1e-5,
+        window_size: int | None = None,
+        scaling: float | None = None,
+        softcap: float | None = None,
+        dropout: float = 0.0,
+        dtype: DType | None = None,
+        rngs: nn.Rngs,
+        quant: tp.Any = None,
+        q_axis_names: AxisNames | None = None,
+        k_axis_names: AxisNames | None = None,
+        v_axis_names: AxisNames | None = None,
+        o_axis_names: AxisNames | None = None,
+        dot_general: tp.Any = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                'num_heads must be divisible by num_kv_heads, got '
+                f'{self.num_heads} and {self.num_kv_heads}'
+            )
+        self.context_dim = hidden_size if context_dim is None else context_dim
+        self.use_qk_norm = qk_norm
+        self.qk_norm_across_heads = qk_norm_across_heads
+        self.qk_norm_eps = epsilon
+        self.window_size = window_size
+        self.scaling = scaling
+        self.softcap = softcap
+        self.dropout = dropout
+
+        # For Grouped Query Attention (GQA)
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
+
+        self.apply_position_fn = apply_position_fn
+        q_bias = k_bias = v_bias = o_bias = False
+        if isinstance(bias, tp.Sequence):
+            assert len(bias) == 4, 'expect `bias` length 4'
+            q_bias = bias[0]
+            k_bias = bias[1]
+            v_bias = bias[2]
+            o_bias = bias[3]
+            bias = False
+
+        self.q_proj = nn.Linear(
+            hidden_size, 
+            (self.num_heads, self.head_dim),
+            dtype=dtype, 
+            bias=q_bias or bias, 
+            rngs=rngs,
+            axis_names=q_axis_names, 
+            shard_mode=shard_mode,
+            quant=quant, 
+            dot_general=dot_general
+        )
+        self.k_proj = nn.Linear(
+            self.context_dim, 
+            (self.num_kv_heads, self.head_dim),
+            dtype=dtype, 
+            bias=k_bias or bias, 
+            rngs=rngs, 
+            axis_names=k_axis_names,
+            shard_mode=shard_mode, 
+            quant=quant, 
+            dot_general=dot_general
+        )
+        self.v_proj = nn.Linear(
+            self.context_dim, 
+            (self.num_kv_heads, self.head_dim),
+            dtype=dtype, 
+            bias=v_bias or bias, 
+            rngs=rngs, 
+            axis_names=v_axis_names,
+            shard_mode=shard_mode, 
+            quant=quant, 
+            dot_general=dot_general
+        )
+        self.o_proj = nn.Linear(
+            (self.num_heads, self.head_dim), 
+            hidden_size,
+            dtype=dtype, 
+            bias=o_bias or bias, 
+            rngs=rngs, 
+            axis_names=o_axis_names,
+            shard_mode=shard_mode, 
+            quant=quant, 
+            dot_general=dot_general
+        )
+
+        self.q_norm = q_norm if isinstance(q_norm, nn.Module) else None
+        self.k_norm = k_norm if isinstance(k_norm, nn.Module) else None
+        q_norm_across_heads = k_norm_across_heads = False
+        if isinstance(qk_norm_across_heads, tp.Sequence):
+            assert len(qk_norm_across_heads) == 2, 'expect `qk_norm_across_heads` length 2'
+            q_norm_across_heads = qk_norm_across_heads[0]
+            k_norm_across_heads = qk_norm_across_heads[1]
+
+        if self.q_norm is None and (qk_norm or q_norm):
+            q_norm_shape = (
+                (self.num_heads, self.head_dim)
+                if q_norm_across_heads
+                else self.head_dim
+            )
+            q_norm_axis_names = (
+                q_axis_names[1:]
+                if q_norm_across_heads and q_axis_names is not None
+                else (
+                    q_axis_names[-1:]
+                    if q_axis_names is not None
+                    else None
+                )
+            )
+            self.q_norm = nn.RMSNorm(
+                q_norm_shape,
+                epsilon=epsilon,
+                dtype=dtype,
+                axis_names=q_norm_axis_names,
+                shard_mode=shard_mode,
+                axes=(-2, -1) if q_norm_across_heads else -1,
+            )
+
+        if self.k_norm is None and (qk_norm or k_norm):
+            k_norm_shape = (
+                (self.num_kv_heads, self.head_dim)
+                if k_norm_across_heads
+                else self.head_dim
+            )
+            k_norm_axis_names = (
+                k_axis_names[1:]
+                if k_norm_across_heads and k_axis_names is not None
+                else (
+                    k_axis_names[-1:]
+                    if k_axis_names is not None
+                    else None
+                )
+            )
+            self.k_norm = nn.RMSNorm(
+                k_norm_shape,
+                epsilon=epsilon,
+                dtype=dtype,
+                axis_names=k_norm_axis_names,
+                shard_mode=shard_mode,
+                axes=(-2, -1) if k_norm_across_heads else -1,
+            )
+
+    @staticmethod
+    def _validate_qkv(
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+    ) -> tuple[int, int, int, int, int, int]:
+        if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+            raise ValueError(
+                'Attention kernels expect query, key, and value in '
+                '[batch, sequence, heads, head_dim] layout'
+            )
+
+        batch_size, query_length, query_heads, head_dim = query.shape
+        key_batch, key_length, key_heads, key_head_dim = key.shape
+        if value.shape[:3] != (key_batch, key_length, key_heads):
+            raise ValueError(
+                'key and value must have matching batch, sequence, and head '
+                f'dimensions, got {key.shape} and {value.shape}'
+            )
+        if batch_size != key_batch or head_dim != key_head_dim:
+            raise ValueError(
+                'query and key must have matching batch and head dimensions, '
+                f'got {query.shape} and {key.shape}'
+            )
+        if query_heads % key_heads != 0:
+            raise ValueError(
+                'query heads must be divisible by key/value heads, got '
+                f'{query_heads} and {key_heads}'
+            )
+        return (
+            batch_size,
+            query_length,
+            key_length,
+            query_heads,
+            key_heads,
+            head_dim,
+        )
+
+    @classmethod
+    def apply_flash_attention(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        boundary_ids: jax.Array | None = None,
+        block_kv: int = 128,
+        block_q: int = 128,
+        mask: jax.Array | tp.Callable[..., jax.Array] | None = None,
+        mask_value: float = -1e9,
+        cap: float | None = None,
+        scale: float | None = None,
+        is_causal: bool = False,
+        query_offset: int | jax.Array = 0,
+        respect_boundaries: bool = True,
+        **kwargs: tp.Any,
+    ) -> jax.Array:
+        """Apply the boundary-aware blockwise FlashAttention path."""
+        from taktiny.cosettes.kernels.attention.flash_attention import (
+            flash_attention,
+        )
+
+        cls._validate_qkv(query, key, value)
+        output = flash_attention(
+            query,
+            key,
+            value,
+            mask=mask,
+            mask_value=mask_value,
+            boundary_ids=boundary_ids,
+            block_kv=block_kv,
+            block_q=block_q,
+            scale=scale,
+            cap=cap,
+            is_causal=is_causal,
+            query_offset=query_offset,
+            respect_boundaries=respect_boundaries,
+            **kwargs,
+        )
+        return output[0] if isinstance(output, tuple) else output
+
+    @classmethod
+    def apply(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        kernel: str = 'dot_product',
+        mask: jax.Array | tp.Callable[..., jax.Array] | None = None,
+        bias: jax.Array | None = None,
+        scale: float | None = None,
+        is_causal: bool = False,
+        boundary_ids: jax.Array | None = None,
+        query_offset: int | jax.Array = 0,
+        respect_boundaries: bool = True,
+        **kwargs: tp.Any,
+    ) -> jax.Array:
+        """Use JAX dot-product attention unless another kernel is selected."""
+        if not isinstance(kernel, str):
+            raise TypeError(
+                f'kernel must be a string, got {type(kernel).__name__}'
+            )
+        kernel = kernel.lower()
+        if kernel in ("ragged", "ragged_attention", "splash", "splash_attention", "ring", "ring_attention"):
+            import warnings
+            warnings.warn(f'{kernel} is unsupported right now fallback to `flash_attention`')
+            kernel = 'flash'
+
+        if kernel in ('flash', 'flash_attention'):
+            if bias is not None:
+                raise ValueError(
+                    'boundary FlashAttention does not support additive bias'
+                )
+            return cls.apply_flash_attention(
+                query,
+                key,
+                value,
+                boundary_ids=boundary_ids,
+                mask=mask,
+                scale=scale,
+                is_causal=is_causal,
+                query_offset=query_offset,
+                respect_boundaries=respect_boundaries,
+                **kwargs,
+            )
+
+        if boundary_ids is not None or callable(mask):
+            from taktiny.cosettes.kernels.attention.flash_attention import (
+                materialize_attention_mask,
+            )
+
+            mask = materialize_attention_mask(
+                mask,
+                batch_size=query.shape[0],
+                num_heads=query.shape[2],
+                query_length=query.shape[1],
+                key_length=key.shape[1],
+                boundary_ids=boundary_ids,
+                is_causal=is_causal,
+                query_offset=query_offset,
+                respect_boundaries=respect_boundaries,
+            )
+            is_causal = False
+
+        if kernel in ('dot_product', 'standard'):
+            return jax.nn.dot_product_attention(
+                query=query,
+                key=key,
+                value=value,
+                bias=bias,
+                mask=mask,
+                scale=scale,
+                is_causal=is_causal,
+                **kwargs,
+            )
+
+        raise ValueError(
+            f"Unknown attention kernel method: '{kernel}'. "
+            "Choose 'dot_product' or 'flash'."
+        )
+
+    def __call__(
+        self,
+        x: jax.Array,
+        context: jax.Array | tp.Tuple[jax.Array, jax.Array] | None = None,
+        attention_mask: jax.Array | tp.Callable[..., jax.Array] | None = None,
+        is_causal: bool = False,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        position_ids: jax.Array | None = None,
+        cache_position: jax.Array | None = None,
+        position_embedding: jax.Array | None = None,
+        boundary_ids: jax.Array | None = None,
+        use_sliding_window: bool | jax.Array = False,
+        kernel: str = "dot_product",
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        
+        context_in = context if context is not None else x
+
+        q = self.q_proj(x)
+        k = self.k_proj(
+            context_in[0] if isinstance(context_in, tuple) else context_in
+        )
+        v = self.v_proj(
+            context_in[1] if isinstance(context_in, tuple) else context_in
+        )
+
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+
+        # Apply Positional Embeddings (if provided)
+        if self.apply_position_fn is not None:
+            q, k = self.apply_position_fn(q, k, position_embedding)
+
+        normalized_cache_position = None
+        if kv_cache is not None:
+            k_cache, v_cache = kv_cache
+            if k_cache.ndim != k.ndim or v_cache.ndim != v.ndim:
+                raise ValueError(
+                    'KV caches and projected updates must have equal ranks'
+                )
+            if k_cache.shape[0] != k.shape[0] or k_cache.shape[2:] != k.shape[2:]:
+                raise ValueError(
+                    'key cache shape must match key updates except for the '
+                    f'sequence axis, got {k_cache.shape} and {k.shape}'
+                )
+            if v_cache.shape[0] != v.shape[0] or v_cache.shape[2:] != v.shape[2:]:
+                raise ValueError(
+                    'value cache shape must match value updates except for the '
+                    f'sequence axis, got {v_cache.shape} and {v.shape}'
+                )
+
+            if cache_position is None:
+                if position_ids is None:
+                    raise ValueError(
+                        'cache_position or position_ids is required with a KV cache'
+                    )
+                cache_position = position_ids
+
+            normalized_cache_position = jnp.asarray(
+                cache_position,
+                dtype=jnp.int32,
+            )
+            expected_shape = (k.shape[0], k.shape[1])
+            if normalized_cache_position.shape != expected_shape:
+                raise ValueError(
+                    'cache_position must have shape [batch, sequence], got '
+                    f'{normalized_cache_position.shape}; expected {expected_shape}'
+                )
+
+            def update_cache_row(
+                cache_row: jax.Array,
+                update_row: jax.Array,
+                row_positions: jax.Array,
+            ) -> jax.Array:
+                return cache_row.at[row_positions].set(update_row)
+
+            k_cache = jax.vmap(update_cache_row)(
+                k_cache,
+                k,
+                normalized_cache_position,
+            )
+            v_cache = jax.vmap(update_cache_row)(
+                v_cache,
+                v,
+                normalized_cache_position,
+            )
+            k = k_cache
+            v = v_cache
+
+        # Sliding Window / Causal Masking
+        if is_causal or self.window_size is not None:
+            if self.window_size is not None:
+                q_len = q.shape[1]
+                k_len = k.shape[1]
+
+                if position_ids is not None:
+                    query_positions = jnp.asarray(position_ids, dtype=jnp.int32)
+                elif normalized_cache_position is not None:
+                    query_positions = normalized_cache_position
+                else:
+                    query_positions = jnp.broadcast_to(
+                        jnp.arange(q_len, dtype=jnp.int32)[None, :],
+                        (q.shape[0], q_len),
+                    )
+                if query_positions.shape != (q.shape[0], q_len):
+                    raise ValueError(
+                        'position_ids must have shape [batch, sequence], got '
+                        f'{query_positions.shape}'
+                    )
+
+                # Cached keys use absolute positions from the start of the
+                # sequence. Uncached keys belong to the same local chunk as Q.
+                if kv_cache is not None:
+                    key_positions = jnp.arange(k_len, dtype=jnp.int32)
+                else:
+                    key_positions = query_positions
+
+                if key_positions.ndim == 1:
+                    key_positions = key_positions[None, :]
+                causal_mask = (
+                    key_positions[:, None, :]
+                    <= query_positions[:, :, None]
+                )
+                window_mask = key_positions[:, None, :] >= (
+                    query_positions[:, :, None]
+                    - self.window_size
+                    + 1
+                )
+                causal_mask = causal_mask[:, None, :, :]
+                window_mask = window_mask[:, None, :, :]
+                sliding_mask = causal_mask & window_mask
+
+                if isinstance(use_sliding_window, bool):
+                    if use_sliding_window:
+                        effective_mask = sliding_mask
+                    elif is_causal:
+                        effective_mask = causal_mask
+                    else:
+                        effective_mask = jnp.ones_like(causal_mask)
+                else:
+                    fallback_mask = (
+                        causal_mask
+                        if is_causal
+                        else jnp.ones_like(causal_mask)
+                    )
+                    effective_mask = jnp.where(
+                        jnp.asarray(use_sliding_window, dtype=jnp.bool_),
+                        sliding_mask,
+                        fallback_mask,
+                    )
+
+                if attention_mask is not None:
+                    attention_mask = attention_mask & effective_mask # pyright: ignore[reportOperatorIssue]
+                else:
+                    attention_mask = effective_mask
+
+                # The absolute-position mask handles causality itself.
+                is_causal = False
+
+        kernel_name = kernel.lower() if isinstance(kernel, str) else kernel
+        is_boundary_flash = kernel_name in {'flash', 'flash_attention'}
+        if (
+            kv_cache is not None
+            and is_causal
+            and not is_boundary_flash
+            and self.window_size is None
+        ):
+            key_positions = jnp.arange(k.shape[1], dtype=jnp.int32)
+            causal_mask = (
+                key_positions[None, None, None, :]
+                <= normalized_cache_position[:, None, :, None] # pyright: ignore[reportOptionalSubscript]
+            )
+            if attention_mask is None:
+                attention_mask = causal_mask
+            elif callable(attention_mask):
+                raise ValueError(
+                    'callable attention masks cannot be combined with cached '
+                    'JAX causal attention'
+                )
+            else:
+                attention_mask = (
+                    jnp.asarray(attention_mask, dtype=jnp.bool_) & causal_mask
+                )
+            is_causal = False
+
+        attention_bias = None
+        if self.softcap is not None and not is_boundary_flash:
+            scale = (
+                self.scaling
+                if self.scaling is not None
+                else self.head_dim ** -0.5
+            )
+            batch_size, query_length, _, _ = q.shape
+            key_length = k.shape[1]
+            grouped_q = q.reshape(
+                batch_size,
+                query_length,
+                self.num_kv_heads,
+                self.num_kv_groups,
+                self.head_dim,
+            )
+            scores = jnp.einsum(
+                'btkgh,bskh->bkgts',
+                grouped_q,
+                k,
+            ) * scale
+            capped_scores = self.softcap * jnp.tanh(scores / self.softcap)
+            attention_bias = (capped_scores - scores).reshape(
+                batch_size,
+                self.num_heads,
+                query_length,
+                key_length,
+            )
+
+        # Apply either JAX dot-product or boundary FlashAttention.
+        query_offset: int | jax.Array = 0
+        if normalized_cache_position is not None:
+            query_offset = normalized_cache_position[:, 0]
+
+        kernel_kwargs: dict[str, tp.Any] = {}
+        if is_boundary_flash and self.softcap is not None:
+            kernel_kwargs['cap'] = self.softcap
+
+        out = self.apply(
+            query=q,
+            key=k,
+            value=v,
+            kernel=kernel,
+            bias=attention_bias,
+            mask=attention_mask,
+            scale=self.scaling,
+            is_causal=is_causal,
+            boundary_ids=boundary_ids,
+            query_offset=query_offset,
+            **kernel_kwargs,
+        )
+
+        # Output projection from (Batch, SeqLen, Heads, HeadDim) directly to (Batch, SeqLen, HiddenSize)
+        out = self.o_proj(out, out_sharding=out_sharding)
+
+        if kv_cache is not None:
+            return out, (k_cache, v_cache) # pyright: ignore[reportPossiblyUnboundVariable]
+
+        return out, None # pyright: ignore[reportReturnType]
+
+
 class JointAttention(nn.Module):
     """Attend jointly over two independently projected token streams.
 
@@ -1229,7 +1799,7 @@ class JointAttention(nn.Module):
 
         if use_qk_norm:
             norm_options = {
-                'eps': qk_norm_eps,
+                'epsilon': qk_norm_eps,
                 'dtype': dtype,
                 'axis_names': ('head_dim',),
                 'shard_mode': shard_mode,
@@ -1307,7 +1877,7 @@ class JointAttention(nn.Module):
             k = jnp.concatenate((k1, k2), axis=1)
             v = jnp.concatenate((v1, v2), axis=1)
 
-        segment_ids = Attention._segments_from_positions(
+        segment_ids = AttentionLegacy._segments_from_positions(
             position_idx,
             batch_size=q.shape[0],
             sequence_length=q.shape[1],
@@ -1316,7 +1886,7 @@ class JointAttention(nn.Module):
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, position_idx)
 
-        out = Attention.apply(
+        out = AttentionLegacy.apply(
             query=q,
             key=k,
             value=v,
@@ -1352,7 +1922,7 @@ class JointAttention(nn.Module):
         )
 
 
-class AttentionPooling(Attention):
+class AttentionPooling(AttentionLegacy):
     def __init__(
         self,
         hidden_size: int,
@@ -1454,7 +2024,7 @@ class TokenResampler(nn.Module):
         self,
         num_queries: int,
         embedding_dim: int,
-        attention: Attention,
+        attention: AttentionLegacy,
         *,
         input_projection: nn.Module | None = None,
         query_norm: nn.Module | None = None,
@@ -1474,7 +2044,7 @@ class TokenResampler(nn.Module):
             raise ValueError('num_queries must be a positive integer')
         if not isinstance(embedding_dim, int) or embedding_dim <= 0:
             raise ValueError('embedding_dim must be a positive integer')
-        if not isinstance(attention, Attention):
+        if not isinstance(attention, AttentionLegacy):
             raise TypeError('attention must be an initialized Attention module')
         if attention.hidden_size != embedding_dim:
             raise ValueError(
@@ -1655,6 +2225,7 @@ class TokenResampler(nn.Module):
         )
 
 __all__ = [
+    'AttentionLegacy',
     'Attention',
     'AttentionPooling',
     'JointAttention',

@@ -103,7 +103,7 @@ class AdaXNorm(nn.Module):
             else:
                 self.normalizer = nn.RMSNorm(
                     None,
-                    eps=eps,
+                    epsilon=eps,
                     with_scale=False,
                     axes=axes,
                     shard_mode=shard_mode,

@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
-from taktiny.cosettes.layers.attention import Attention, JointAttention
+from taktiny.cosettes.layers.attention import AttentionLegacy, JointAttention
 from taktiny.cosettes.layers.ffn import FeedForward, GLUMBConv
 from taktiny.cosettes.layers.normalization import AdaXNorm, NormType
 from taktiny.nn.continuo import (
@@ -216,7 +216,7 @@ class TransformerEncoderLayer(nn.Module):
         dot_general: Any,
     ) -> None:
         head_dim = hidden_size // num_heads
-        self.self_attention = Attention(
+        self.self_attention = AttentionLegacy(
             hidden_size,
             num_heads,
             head_dim,
@@ -353,8 +353,8 @@ class TransformerDecoderLayer(nn.Module):
             'quant': quant,
             'dot_general': dot_general,
         }
-        self.self_attention = Attention(**attention_options)
-        self.cross_attention = Attention(**attention_options)
+        self.self_attention = AttentionLegacy(**attention_options)
+        self.cross_attention = AttentionLegacy(**attention_options)
         self.feed_forward = FeedForward(
             hidden_size,
             intermediate_size,
@@ -905,8 +905,8 @@ class ConditionalTransformerLayer(nn.Module):
         quant: Any = None,
         dot_general: Any = None,
         input_layernorm: ModuleSpec = nn.LayerNorm,
-        self_attention: ModuleSpec = Attention,
-        cross_attention: ModuleSpec | None = Attention,
+        self_attention: ModuleSpec = AttentionLegacy,
+        cross_attention: ModuleSpec | None = AttentionLegacy,
         cross_attention_layernorm: ModuleSpec | None = None,
         post_attention_layernorm: ModuleSpec = nn.LayerNorm,
         mlp: ModuleSpec = GLUMBConv,
@@ -974,9 +974,9 @@ class ConditionalTransformerLayer(nn.Module):
                 'k_bias': bias,
                 'v_bias': bias,
                 'o_bias': attention_out_bias,
-                'use_qkv_norm': use_qkv_norm,
-                'qkv_norm_across_heads': qkv_norm_across_heads,
-                'qkv_norm_eps': qkv_norm_eps,
+                'use_qk_norm': use_qkv_norm,
+                'qk_norm_across_heads': qkv_norm_across_heads,
+                'qk_norm_eps': qkv_norm_eps,
                 'dtype': dtype,
                 'rngs': rngs,
                 'q_axis_names': ('embed', 'heads', 'head_dim'),
@@ -1006,9 +1006,9 @@ class ConditionalTransformerLayer(nn.Module):
                     'k_bias': cross_attention_bias,
                     'v_bias': cross_attention_bias,
                     'o_bias': attention_out_bias,
-                    'use_qkv_norm': use_qkv_norm,
-                    'qkv_norm_across_heads': qkv_norm_across_heads,
-                    'qkv_norm_eps': qkv_norm_eps,
+                    'use_qk_norm': use_qkv_norm,
+                    'qk_norm_across_heads': qkv_norm_across_heads,
+                    'qk_norm_eps': qkv_norm_eps,
                     'dtype': dtype,
                     'rngs': rngs,
                     'q_axis_names': (
@@ -1321,7 +1321,7 @@ class JointTransformerLayer(nn.Module):
         input_layernorm: ModuleSpec = AdaXNorm,
         context_input_layernorm: ModuleSpec = AdaXNorm,
         joint_attention: ModuleSpec = JointAttention,
-        second_attention: ModuleSpec = Attention,
+        second_attention: ModuleSpec = AttentionLegacy,
         post_attention_layernorm: ModuleSpec | None = None,
         context_post_attention_layernorm: ModuleSpec | None = None,
         mlp: ModuleSpec = FeedForward,
@@ -1443,8 +1443,8 @@ class JointTransformerLayer(nn.Module):
                 'head_dim': self.head_dim,
                 'pos_emb': pos_emb,
                 'bias': bias,
-                'use_qkv_norm': use_qkv_norm,
-                'qkv_norm_eps': qkv_norm_eps,
+                'use_qk_norm': use_qkv_norm,
+                'qk_norm_eps': qkv_norm_eps,
                 'dtype': dtype,
                 'rngs': rngs,
                 'q_axis_names': ('embed', 'heads', 'head_dim'),
@@ -1468,8 +1468,8 @@ class JointTransformerLayer(nn.Module):
                     'head_dim': self.head_dim,
                     'pos_emb': second_pos_emb,
                     'bias': bias,
-                    'use_qkv_norm': use_qkv_norm,
-                    'qkv_norm_eps': qkv_norm_eps,
+                    'use_qk_norm': use_qkv_norm,
+                    'qk_norm_eps': qkv_norm_eps,
                     'dtype': dtype,
                     'rngs': rngs,
                     'q_axis_names': ('embed', 'heads', 'head_dim'),
@@ -1602,6 +1602,7 @@ class JointTransformerLayer(nn.Module):
                 **options,
             )
         if issubclass(module, nn.RMSNorm):
+            options['epsilon'] = options.pop('eps')
             return module(
                 hidden_size,
                 with_scale=False,
@@ -2022,7 +2023,7 @@ class ParallelAttentionMLP(nn.Module):
             **projection_options,
         )
         norm_options = {
-            'eps': eps,
+            'epsilon': eps,
             'dtype': dtype,
             'axis_names': ('head_dim',),
             'shard_mode': shard_mode,
@@ -2054,7 +2055,7 @@ class ParallelAttentionMLP(nn.Module):
         if self.pos_emb is not None:
             query, key = self.pos_emb(query, key, position_idx)
 
-        attention = Attention.apply(
+        attention = AttentionLegacy.apply(
             query,
             key,
             value,

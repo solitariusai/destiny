@@ -167,7 +167,7 @@ class GLUMBConv(nn.Module):
         self.norm = (
             nn.RMSNorm(
                 hidden_size,
-                eps=norm_eps,
+                epsilon=norm_eps,
                 dtype=jnp.float32,
                 bias=norm_bias,
                 axis_names=('embed',),
@@ -368,7 +368,93 @@ class FusedGateMLP(nn.Module):
         else:
             raise ValueError(f"Unknown MoE kernel method: '{kernel}'")
 
-class MoeFFN(nn.Module):
+
+class MoERouter(nn.Module):
+    """Route tokens to their highest-scoring experts.
+
+    The router projects each token to ``num_experts`` logits, computes the
+    routing probabilities in float32, and selects ``top_k`` experts. Returned
+    scores optionally sum to one across the selected experts.
+
+    Inputs may have any leading dimensions; they are flattened into tokens in
+    the returned arrays. The return shapes are ``[tokens, num_experts]`` for
+    logits and ``[tokens, top_k]`` for both scores and indices.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        *,
+        top_k: int,
+        num_experts: int,
+        norm_topk: bool = True,
+        rngs: nn.Rngs,
+        dtype: DType | None = None,
+        dot_general: Any = None,
+        axis_names: AxisNames | None = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ) -> None:
+        if hidden_size <= 0:
+            raise ValueError('hidden_size must be greater than zero')
+        if num_experts <= 0:
+            raise ValueError('num_experts must be greater than zero')
+        if not 1 <= top_k <= num_experts:
+            raise ValueError(
+                'top_k must be between 1 and num_experts, got '
+                f'{top_k} and {num_experts}'
+            )
+
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.norm_topk = norm_topk
+        self.hidden_size = hidden_size
+        self.proj = nn.Linear(
+            hidden_size,
+            num_experts,
+            bias=False,
+            dtype=dtype,
+            rngs=rngs,
+            dot_general=dot_general,
+            axis_names=axis_names,
+            shard_mode=shard_mode,
+        )
+
+    def __call__(
+        self,
+        x: jax.Array,
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        if x.ndim == 0 or x.shape[-1] != self.hidden_size:
+            raise ValueError(
+                'x must have a trailing hidden dimension of size '
+                f'{self.hidden_size}, got shape {x.shape}'
+            )
+
+        hidden_states = x.reshape(-1, self.hidden_size)
+        router_logits = self.proj(hidden_states, out_sharding=out_sharding)
+        router_probs = jax.nn.softmax(
+            router_logits.astype(jnp.float32),
+            axis=-1,
+        )
+        router_scores, router_indices = jax.lax.top_k(
+            router_probs,
+            self.top_k,
+        )
+        if self.norm_topk:
+            router_scores = router_scores / jnp.sum(
+                router_scores,
+                axis=-1,
+                keepdims=True,
+            )
+
+        return (
+            router_logits,
+            router_scores.astype(router_logits.dtype),
+            router_indices,
+        )
+
+
+class MoEFFN(nn.Module):
     """
     Mixture-of-Experts (MoE) FFN module utilizing Megablox Grouped Matrix Multiply (GMM)
     and activation sorting kernels.

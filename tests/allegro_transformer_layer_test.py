@@ -45,8 +45,8 @@ def test_allegro_layer_declares_conditional_topology():
 
     assert isinstance(layer, ConditionalTransformerLayer)
     assert isinstance(layer.norm1, nn.LayerNorm)
-    assert isinstance(layer.attn1, ly.Attention)
-    assert isinstance(layer.attn2, ly.Attention)
+    assert isinstance(layer.attn1, ly.AttentionLegacy)
+    assert isinstance(layer.attn2, ly.AttentionLegacy)
     assert layer.norm_cross is None
     assert isinstance(layer.norm2, nn.LayerNorm)
     assert isinstance(layer.ff, ly.FeedForward)

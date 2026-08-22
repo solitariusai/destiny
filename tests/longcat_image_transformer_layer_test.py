@@ -110,7 +110,7 @@ def test_longcat_joint_attention_uses_text_then_image_token_order():
     text_q = layer.attn.q_norm_2(layer.attn.q_proj_2(enc_x))
     text_k = layer.attn.k_norm_2(layer.attn.k_proj_2(enc_x))
     text_v = layer.attn.v_proj_2(enc_x)
-    combined = ly.Attention.apply(
+    combined = ly.AttentionLegacy.apply(
         jnp.concatenate((text_q, image_q), axis=1),
         jnp.concatenate((text_k, image_k), axis=1),
         jnp.concatenate((text_v, image_v), axis=1),

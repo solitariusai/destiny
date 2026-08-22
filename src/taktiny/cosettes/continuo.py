@@ -231,7 +231,7 @@ def _normalization(
     if normalized in {'rms', 'rmsnorm'}:
         return nn.RMSNorm(
             channels,
-            eps=1e-5,
+            epsilon=1e-5,
             dtype=jnp.float32,
             bias=True,
             axis_names=('embed',),

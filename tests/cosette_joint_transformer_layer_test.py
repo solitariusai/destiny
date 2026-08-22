@@ -37,7 +37,7 @@ def test_joint_transformer_cosette_derives_layer_topology_from_config():
     assert first.context_size == 8
     assert not first.dual_attention
     assert dual.dual_attention
-    assert isinstance(dual.attn2, ly.Attention)
+    assert isinstance(dual.attn2, ly.AttentionLegacy)
     assert final.context_pre_only
     assert final.ff_context is None
 

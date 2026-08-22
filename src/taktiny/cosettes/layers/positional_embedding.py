@@ -15,6 +15,7 @@
 from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
+import typing as tp
 import math
 import jax
 import jax.numpy as jnp
@@ -107,6 +108,90 @@ class RotaryEmbedding(nn.Module):
 
         return q_embed, k_embed
 
+
+class _RotaryEmbedding(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        max_position_embeddings: int = 4096,
+        base: float = 10000.0,
+        rope_scaling: tp.Mapping[str, Any] | None = None,
+    ) -> None:
+        self.dim = dim
+        self.max_position_embeddings = max_position_embeddings
+        self.base = base
+        self.rope_scaling = rope_scaling
+
+    @classmethod
+    def apply_rope(cls, q: jax.Array, k: jax.Array, emb: tp.Tuple[jax.Array, jax.Array]):
+        cos, sin = emb
+        q_embed = (q * cos.astype(q.dtype)) + (
+            rotate_half(q) * sin.astype(q.dtype)
+        )
+        k_embed = (k * cos.astype(k.dtype)) + (
+            rotate_half(k) * sin.astype(k.dtype)
+        )
+        return q_embed, k_embed
+
+    def __call__(
+        self,
+        x: jax.Array,
+        position_ids: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:
+        # q and k are expected to have shape [batch, seq_len, num_heads, head_dim]
+        seq_len = x.shape[1]
+
+        inv_freq = 1.0 / (self.base ** (jnp.arange(0, self.dim, 2, dtype=jnp.float32) / self.dim))
+
+        if self.rope_scaling is not None and self.rope_scaling.get("rope_type") == "llama3":
+            import math
+            factor = self.rope_scaling.get("factor", 8.0)
+            low_freq_factor = self.rope_scaling.get("low_freq_factor", 1.0)
+            high_freq_factor = self.rope_scaling.get("high_freq_factor", 4.0)
+            old_context_len = self.rope_scaling.get("original_max_position_embeddings", 8192)
+
+            low_freq_wavelen = old_context_len / low_freq_factor
+            high_freq_wavelen = old_context_len / high_freq_factor
+
+            wavelen = 2 * math.pi / inv_freq
+
+            inv_freq_llama = jnp.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+            smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+            smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+
+            is_medium_freq = ~(wavelen < high_freq_wavelen) & ~(wavelen > low_freq_wavelen)
+            inv_freq = jnp.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+        positions = jnp.arange(seq_len, dtype=jnp.float32)
+        if position_ids is not None:
+            position_ids = jnp.asarray(position_ids, dtype=jnp.float32)
+            if position_ids.ndim == 0:
+                positions = positions + position_ids
+            elif position_ids.ndim == 1:
+                positions = position_ids[:, None] + positions[None, :]
+            elif position_ids.ndim == 2:
+                if position_ids.shape[1] != seq_len:
+                    raise ValueError(
+                        'per-token position_ids must match sequence length'
+                    )
+                positions = position_ids
+            else:
+                raise ValueError(
+                    'position_ids must be a scalar, batch vector, or '
+                    'per-token matrix'
+                )
+
+        if positions.ndim == 1:
+            freqs = jnp.einsum('s,d->sd', positions, inv_freq)
+        else:
+            freqs = jnp.einsum('bs,d->bsd', positions, inv_freq)
+
+        emb = jnp.concatenate((freqs, freqs), axis=-1)
+        if emb.ndim == 2:
+            emb = emb[None, :, None, :]
+        else:
+            emb = emb[:, :, None, :]
+        return jnp.cos(emb), jnp.sin(emb)
 
 class MultiAxisRotaryEmbedding(nn.Module):
     """Apply rotary embeddings whose head width is split across position axes.
@@ -371,5 +456,6 @@ __all__ = [
     'MultiAxisRotaryEmbedding',
     'rotate_half',
     'RotaryEmbedding',
+    '_RotaryEmbedding',
     'SinusoidalPositionalEmbedding',
 ]
