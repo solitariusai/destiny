@@ -585,6 +585,61 @@ def test_save_pretrained_module_map_argument_overrides_remembered(tmp_path):
         assert set(checkpoint.keys()) == {'proj.weight'}
 
 
+def test_save_pretrained_skips_module_map_rules_that_never_fired(tmp_path):
+    """A module_map rule whose source pattern is absent from the checkpoint
+    must not be inverted at save time; loading a text-only checkpoint with a
+    multimodal prefix rule would otherwise gain that prefix back."""
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    weight = np.arange(16, dtype=np.float32).reshape(4, 4)
+    # The checkpoint already uses internal names ('proj'); neither
+    # ('block', 'proj') nor ('ghost.', 'model.') matches anything.
+    save_file({'proj.weight': weight}, source_dir / 'model.safetensors')
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    model = TinyLoadableModel.from_pretrained(
+        source_dir,
+        config,
+        local=True,
+        module_map=[('ghost.', 'model.'), ('block', 'proj')],
+    )
+    out = tmp_path / 'out'
+    model.save_pretrained(out)
+
+    with safe_open(out / 'model.safetensors', framework='np') as checkpoint:
+        assert set(checkpoint.keys()) == {'proj.weight'}
+
+
+def test_save_pretrained_inverts_only_fired_rules(tmp_path):
+    """With several rules, only those whose source pattern appeared in the
+    loaded checkpoint are reversed when saving."""
+    source_dir = tmp_path / 'src'
+    source_dir.mkdir()
+    weight = np.arange(16, dtype=np.float32).reshape(4, 4)
+    save_file({'block.weight': weight}, source_dir / 'model.safetensors')
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    model = TinyLoadableModel.from_pretrained(
+        source_dir,
+        config,
+        local=True,
+        module_map=[('ghost.', 'model.'), ('block', 'proj')],
+    )
+    out = tmp_path / 'out'
+    model.save_pretrained(out)
+
+    with safe_open(out / 'model.safetensors', framework='np') as checkpoint:
+        assert set(checkpoint.keys()) == {'block.weight'}
+
+
 def test_resolve_sharding_rules_uses_private_attribute():
     class PrivateRules(PretrainedModel):
         _default_sharding_rules = (('vocab', 'tp'),)

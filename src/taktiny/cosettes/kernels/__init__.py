@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""High-performance kernels for TakTiny (Attention, Megablox GMM, Ragged, Gather-Reduce)."""
+"""Experimental kernels for TakTiny (Attention, Megablox GMM, Ragged, Gather-Reduce)."""
 
 from taktiny.cosettes.kernels import attention
 from taktiny.cosettes.kernels import megablox

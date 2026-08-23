@@ -491,6 +491,38 @@ class PretrainedModel(nn.Module):
             inverted = remapped
         return inverted
 
+    @staticmethod
+    def _fired_rename_rules(
+        checkpoint_keys: tp.Any,
+        module_map: tp.Any,
+    ) -> tp.Any:
+        """Select rename rules that matched the loaded checkpoint's names.
+
+        ``from_pretrained`` remembers its module map so saving can restore
+        source spellings, but a rule whose source pattern never appears in
+        the checkpoint (e.g. a multimodal ``model.language_model.`` rule used
+        to load a text-only checkpoint) must not be inverted at save time;
+        doing so would rename tensors that loading never touched.
+        """
+        simulated = set(checkpoint_keys)
+        fired = []
+        for rule in module_map:
+            if len(rule) != 2:
+                continue
+            source_pattern, target_pattern = rule
+            if (
+                not isinstance(source_pattern, str)
+                or source_pattern == target_pattern
+            ):
+                continue
+            if any(source_pattern in key for key in simulated):
+                fired.append((source_pattern, target_pattern))
+                simulated = {
+                    key.replace(source_pattern, target_pattern)
+                    for key in simulated
+                }
+        return fired
+
     def _checkpoint_snapshot(self) -> dict[tp.Any, tp.Any]:
         """Capture stable host state for background checkpoint writing."""
         adapter_state = self._expand_stacked_state_dict(
@@ -740,7 +772,7 @@ class PretrainedModel(nn.Module):
     def save_pretrained(
         self,
         path: str,
-        max_shard_size: str='5GB',
+        max_shard_size: str='50GB',
         module_map: tp.Any=None,
     ) -> tp.Any:
         """Save a full model checkpoint or the model's LoRA adapters.
@@ -1150,7 +1182,7 @@ class PretrainedModel(nn.Module):
         sharding_rules: LogicalRules | None = None,
         allow_unmatched: bool = False,
         show_progress: bool = True,
-        load_chunk_size: int | str | None = '1GB',
+        load_chunk_size: int | str | None = '100GB',
         **kwargs,
     ) -> tp.Any:
         """
@@ -1335,9 +1367,10 @@ class PretrainedModel(nn.Module):
         )
         state.original_config_dict = original_config_dict
         state.loaded_dtype_override = plain_dtype_override
-        # Remember the name mapping used during load so that saving can
-        # restore the checkpoint's original tensor names.
-        state.checkpoint_module_map = [tuple(rule) for rule in module_map]
+        # Remember which module_map rules fire during load so that saving can
+        # restore only the checkpoint spellings that were actually mapped.
+        state.checkpoint_module_map = []
+        checkpoint_keys_seen = set()
         if native_qwix_directory is not None:
             state.load_pretrained(native_qwix_directory)
             state.base_model_name_or_path = path_or_repo_str
@@ -1667,6 +1700,7 @@ class PretrainedModel(nn.Module):
             shard_path = resolved_files[file_name]
             with safe_open(shard_path, framework="np", device="cpu") as f:
                 keys_to_process = keys_in_file if keys_in_file is not None else f.keys()
+                checkpoint_keys_seen.update(keys_to_process)
 
                 # Multi-source mapping rules (N-to-1) require their sibling
                 # tensors to be name-mapped together, so each sibling set
@@ -1973,6 +2007,10 @@ class PretrainedModel(nn.Module):
                 )
 
         # 6. Inject actual arrays into the PyTree skeleton
+        state.checkpoint_module_map = cls._fired_rename_rules(
+            checkpoint_keys_seen,
+            module_map,
+        )
         state.load_flat_state_dict(new_state)
         state.base_model_name_or_path = path_or_repo_str
         return state
