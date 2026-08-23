@@ -923,8 +923,15 @@ class PretrainedModel(nn.Module):
 
         def stabilize(values: tp.Any) -> tp.Any:
             def copy_leaf(value: tp.Any) -> tp.Any:
-                if isinstance(value, np.ndarray) and not value.flags['OWNDATA']:
-                    return np.array(value, copy=True)
+                # Per-layer slices of stacked tensors are contiguous views
+                # that pin their base buffer, so safetensors can read them
+                # in place; copying every view would duplicate the whole
+                # shard on host. Only materialize non-contiguous arrays.
+                if (
+                    isinstance(value, np.ndarray)
+                    and not value.flags['C_CONTIGUOUS']
+                ):
+                    return np.ascontiguousarray(value)
                 return value
 
             return jax.tree.map(copy_leaf, values)
