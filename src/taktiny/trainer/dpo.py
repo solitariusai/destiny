@@ -164,21 +164,20 @@ def _get_batch_logps(logits: Any, labels: Any) -> Any:
     
     loss_mask = shifted_labels != -100
     safe_labels = jnp.where(loss_mask, shifted_labels, 0)
-    
-    # gather logprobs
-    logprobs = jax.nn.log_softmax(shifted_logits, axis=-1)
-    
-    # Extract logprob of the correct token
-    token_logps = jnp.take_along_axis(
-        logprobs, safe_labels[..., None], axis=-1
+
+    # Upcast to float32 BEFORE log-normalization: DPO is highly sensitive to
+    # log-prob precision. Gathering the token logit and subtracting the
+    # logsumexp avoids materializing a second full-size (B, L, V) buffer.
+    shifted_logits = shifted_logits.astype(jnp.float32)
+    token_logits = jnp.take_along_axis(
+        shifted_logits, safe_labels[..., None], axis=-1
     ).squeeze(-1)
-    
+    token_logps = token_logits - jax.nn.logsumexp(shifted_logits, axis=-1)
+
     # Mask out padding and prompt tokens
     masked_logps = jnp.where(loss_mask, token_logps, 0.0)
-    
-    # Sum over sequence to get sequence logprobs
-    # DPO is highly sensitive to log-prob differences. BF16 has ~0.5 resolution at mag 100.
-    # Accumulating the sum in float32 prevents critical precision loss.
+
+    # Sum over sequence to get sequence logprobs in float32
     return jnp.sum(masked_logps.astype(jnp.float32), axis=-1)
 
 
@@ -242,7 +241,7 @@ from rich import print as rprint
 
 class DPOMetricsCallback(TrainerCallback):
     def on_step_end(self, trainer, logs, **kwargs):
-        metrics = DPOTrainer._flush_metrics()
+        metrics = trainer._flush_metrics()
         if metrics:
             logs.update(metrics)
             
@@ -260,21 +259,17 @@ class DPOMetricsCallback(TrainerCallback):
             
 class DPOTrainer(Trainer):
     """Trainer specialized for Direct Preference Optimization (DPO)."""
-    
-    _metrics_accumulator = defaultdict(list)
-    
-    @classmethod
-    def _record_microbatch_metrics(cls, metrics):
+
+    def _record_microbatch_metrics(self, metrics):
         # Called via jax.debug.callback on the host during training
         for k, v in metrics.items():
-            cls._metrics_accumulator[k].append(float(v))
-            
-    @classmethod
-    def _flush_metrics(cls):
-        if not cls._metrics_accumulator:
+            self._metrics_accumulator[k].append(float(v))
+
+    def _flush_metrics(self):
+        if not self._metrics_accumulator:
             return {}
-        averaged = {k: sum(v)/len(v) for k, v in cls._metrics_accumulator.items()}
-        cls._metrics_accumulator.clear()
+        averaged = {k: sum(v)/len(v) for k, v in self._metrics_accumulator.items()}
+        self._metrics_accumulator.clear()
         return averaged
 
     def __init__(
@@ -287,6 +282,7 @@ class DPOTrainer(Trainer):
         loss_type: str = 'dpo',
         **kwargs: Any,
     ) -> None:
+        self._metrics_accumulator = defaultdict(list)
         if dataset_config is None:
             raise ValueError('DPOTrainer requires a DPODatasetConfig')
         if training_config is None:

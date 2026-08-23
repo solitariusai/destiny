@@ -2078,6 +2078,7 @@ class Trainer:
         )
         accumulated_grads = None
         accumulated_loss = None
+        accumulated_metrics = None
         accumulated_microbatches = 0
 
         # Try to guess total optimizer updates if dataloader has __len__.

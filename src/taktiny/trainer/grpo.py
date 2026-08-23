@@ -51,19 +51,18 @@ def _get_batch_logps(
     loss_mask: jax.Array,
 ) -> jax.Array:
     """Extracts log probabilities of the given labels (tokens) from the logits."""
-    # logits shape: (B, L, V)
-    # labels shape: (B, L)
-    
     # Upcast logits to float32 BEFORE log_softmax to guarantee precision
     logits = logits.astype(jnp.float32)
-    # gather logprobs
-    logprobs = jax.nn.log_softmax(logits, axis=-1)
-    
-    # Extract logprob of the correct token
-    token_logps = jnp.take_along_axis(
-        logprobs, labels[..., None], axis=-1
+    # Padded positions may hold sentinel values (e.g. -100); clamp so the
+    # gather stays in bounds, those rows are dropped by loss_mask below.
+    safe_labels = jnp.maximum(labels, 0)
+    # log p(label) = logit[label] - logsumexp(logits). Gathering directly
+    # avoids materializing a second full-size buffer that log_softmax would.
+    token_logits = jnp.take_along_axis(
+        logits, safe_labels[..., None], axis=-1
     ).squeeze(-1)
-    
+    token_logps = token_logits - jax.nn.logsumexp(logits, axis=-1)
+
     # Return masked token logprobs (B, L)
     return jnp.where(loss_mask, token_logps, 0.0)
 
