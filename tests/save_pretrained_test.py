@@ -394,6 +394,41 @@ def test_streamed_save_writes_shards_and_index(tmp_path):
     )
 
 
+def test_streamed_save_prefetch_toggle_is_byte_identical(
+    tmp_path,
+    monkeypatch,
+):
+    """The JAX-native prefetch path must produce exactly the same files as
+    plain sequential fetching."""
+    source = TinyStackedPretrainedModel()
+    weight = np.random.default_rng(0).standard_normal((2, 4, 3)).astype(
+        np.float32
+    )
+    source.layers.stacked.proj.weight.value = jnp.asarray(weight)
+
+    out_async = tmp_path / 'async'
+    out_sync = tmp_path / 'sync'
+    monkeypatch.delenv('TAKTINY_SAVE_PREFETCH', raising=False)
+    source.save_pretrained(out_async, max_shard_size=64)
+    monkeypatch.setenv('TAKTINY_SAVE_PREFETCH', '0')
+    source.save_pretrained(out_sync, max_shard_size=64)
+
+    async_files = sorted(p.name for p in out_async.iterdir())
+    sync_files = sorted(p.name for p in out_sync.iterdir())
+    assert async_files == sync_files
+    for name in async_files:
+        assert (out_async / name).read_bytes() == (
+            out_sync / name
+        ).read_bytes()
+
+    restored = TinyStackedPretrainedModel()
+    restored.load_pretrained(out_async)
+    np.testing.assert_array_equal(
+        restored.layers.stacked.proj.weight.value,
+        source.layers.stacked.proj.weight.value,
+    )
+
+
 def test_dense_save_removes_stale_qwix_metadata(tmp_path):
     model = TinyPretrainedModel()
     dense_weight = model.proj.weight.value

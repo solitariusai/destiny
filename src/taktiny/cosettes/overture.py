@@ -32,7 +32,7 @@ from huggingface_hub import (
     hf_hub_download,
     split_state_dict_into_shards_factory,
 )
-from safetensors.flax import save_file
+from safetensors.numpy import save_file
 import numpy as np
 from safetensors import safe_open
 from ..utils.quantization import (
@@ -859,15 +859,27 @@ class PretrainedModel(nn.Module):
                 last_use[key] = shard_index
 
         total_bytes = sum(self._storage_nbytes(v) for v in renamed.values())
-        if is_jax_rank_zero() and len(shard_items) > 1:
-            print(
-                f'[taktiny] planning save: {len(shard_items)} shards, '
-                f'~{total_bytes / 1e9:.2f} GB'
-            )
         saved_paths = [config_path]
         quantization_parameters: dict = {}
         host_cache: dict = {}
         write_start = time.perf_counter()
+
+        # Writes go straight to the Rust safetensors writer one shard at a
+        # time. Optional JAX-native prefetch issues shard N+1's device
+        # copies before shard N is written, overlapping DMA with disk I/O;
+        # enable with TAKTINY_SAVE_PREFETCH=1 after verifying it wins on the
+        # target accelerator, since CPU backends measure slower with it.
+        use_prefetch = (
+            len(shard_items) > 1
+            and os.environ.get('TAKTINY_SAVE_PREFETCH', '0') == '1'
+            and hasattr(jax.Array, 'copy_to_host_async')
+        )
+        if is_jax_rank_zero() and len(shard_items) > 1:
+            print(
+                f'[taktiny] planning save: {len(shard_items)} shards, '
+                f'~{total_bytes / 1e9:.2f} GB '
+                f'(prefetch {"on" if use_prefetch else "off"})'
+            )
 
         def stabilize(values: tp.Any) -> tp.Any:
             def copy_leaf(value: tp.Any) -> tp.Any:
@@ -884,8 +896,8 @@ class PretrainedModel(nn.Module):
 
             return jax.tree.map(copy_leaf, values)
 
-        def prepare_shard(item: tp.Any) -> tuple[str, dict, float]:
-            shard_index, (shard_filename, tensor_names) = item
+        def begin_shard(shard_index: int, tensor_names: list) -> dict:
+            """Resolve exact device runs and optionally start their D2H."""
             requested_bytes = sum(
                 self._storage_nbytes(expanded[internal_of_display[name]])
                 for name in tensor_names
@@ -932,11 +944,40 @@ class PretrainedModel(nn.Module):
                         flat[source][run_start:previous + 1]
                     )
 
-            d2h_seconds = 0.0
+            prefetched = False
+            if use_prefetch and to_fetch:
+                try:
+                    for block in to_fetch.values():
+                        block.copy_to_host_async()
+                    prefetched = True
+                except Exception:
+                    prefetched = False
+            return {
+                'index': shard_index,
+                'to_fetch': to_fetch,
+                'requested_bytes': requested_bytes,
+                'fetched_bytes': fetched_bytes,
+                'prefetched': prefetched,
+            }
+
+        def materialize_shard(handle: dict) -> None:
+            shard_index = handle['index']
+            to_fetch = handle['to_fetch']
+            handle['d2h_seconds'] = 0.0
+            handle['sync_seconds'] = 0.0
             if to_fetch:
-                fetch_start = time.perf_counter()
+                blocks = list(to_fetch.values())
+                # Charge pending device work to 'sync', not to the transfer,
+                # so the D2H figure reflects transfer throughput alone.
+                sync_start = time.perf_counter()
+                jax.block_until_ready(blocks)
+                handle['sync_seconds'] = time.perf_counter() - sync_start
+
+                transfer_start = time.perf_counter()
                 fetched = jax.device_get(to_fetch)
-                d2h_seconds = time.perf_counter() - fetch_start
+                handle['d2h_seconds'] = (
+                    time.perf_counter() - transfer_start
+                )
                 for key, block in fetched.items():
                     if len(key) == 2:
                         host_cache[key] = block
@@ -944,24 +985,32 @@ class PretrainedModel(nn.Module):
                         _, lo, hi = key
                         for offset in range(hi - lo + 1):
                             host_cache[(key[0], lo + offset)] = block[offset]
-                if is_jax_rank_zero() and (
-                    len(shard_items) > 1 or d2h_seconds >= 0.5
-                ):
-                    cache_bytes = sum(
-                        self._resident_nbytes(value)
-                        for value in host_cache.values()
-                    )
-                    print(
-                        f'[taktiny] shard {shard_index + 1}/'
-                        f'{len(shard_items)}: D2H {d2h_seconds:.1f}s | '
-                        f'fetched {fetched_bytes / 1e6:.0f}MB of '
-                        f'{requested_bytes / 1e6:.0f}MB requested | '
-                        f'host cache {cache_bytes / 1e6:.0f}MB'
-                    )
 
+            if to_fetch and is_jax_rank_zero() and (
+                len(shard_items) > 1 or handle['d2h_seconds'] >= 0.5
+            ):
+                run_sizes = sorted(
+                    self._resident_nbytes(block) for block in to_fetch.values()
+                )
+                cache_bytes = sum(
+                    self._resident_nbytes(value)
+                    for value in host_cache.values()
+                )
+                print(
+                    f'[taktiny] shard {shard_index + 1}/'
+                    f'{len(shard_items)}: D2H {handle["d2h_seconds"]:.1f}s '
+                    f'(+sync {handle["sync_seconds"]:.1f}s) | '
+                    f'{len(run_sizes)} runs, largest '
+                    f'{run_sizes[-1] / 1e6:.0f}MB, median '
+                    f'{run_sizes[len(run_sizes) // 2] / 1e6:.0f}MB | '
+                    f'fetched {handle["fetched_bytes"] / 1e6:.0f}MB of '
+                    f'{handle["requested_bytes"] / 1e6:.0f}MB requested | '
+                    f'host cache {cache_bytes / 1e6:.0f}MB'
+                )
+
+        def build_shard(shard_filename: str, tensor_names: list) -> dict:
             # Build under internal spellings; the single inversion below
             # restores source-format names exactly like the eager path.
-            prep_start = time.perf_counter()
             shard_state = {}
             for name in tensor_names:
                 internal = internal_of_display[name]
@@ -972,46 +1021,50 @@ class PretrainedModel(nn.Module):
             encoded, metadata = self._encode_qwix_state(inverted)
             if metadata is not None:
                 quantization_parameters.update(metadata['parameters'])
-            return (
-                shard_filename,
-                encoded,
-                time.perf_counter() - prep_start,
+            return encoded
+
+        pending = None
+        for shard_index, (shard_filename, tensor_names) in enumerate(
+            shard_items,
+        ):
+            current = (
+                pending
+                if pending is not None
+                else begin_shard(shard_index, tensor_names)
             )
+            materialize_shard(current)
+            encoded = build_shard(shard_filename, tensor_names)
 
-        prepared_items = enumerate(shard_items)
+            # Kick off shard N+1's DMA before handing shard N to the Rust
+            # writer so the transfer overlaps serialization and disk I/O.
+            if shard_index + 1 < len(shard_items):
+                pending = begin_shard(
+                    shard_index + 1,
+                    shard_items[shard_index + 1][1],
+                )
+            else:
+                pending = None
 
-        def write_shard(prepared: tuple[str, dict, float]) -> str:
-            shard_filename, encoded, _ = prepared
             shard_path = os.path.join(path, shard_filename)
             write_shard_start = time.perf_counter()
             save_file(encoded, shard_path)
+            del encoded
             if is_jax_rank_zero() and len(shard_items) > 1:
                 print(
                     f'[taktiny] wrote {shard_filename} in '
                     f'{time.perf_counter() - write_shard_start:.1f}s'
                 )
-            return shard_path
+            saved_paths.append(shard_path)
 
-        # Writes contend on one disk; more than two writers rarely helps and
-        # can degrade I/O. In-flight shards are capped so peak host memory
-        # stays at a couple of shards (fetch of shard N+1 overlaps the write
-        # of shard N), not at workers x shard size.
-        workers = max(1, min(len(shard_items), 2))
-        max_in_flight = workers + 1
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            pending = []
-            for item in prepared_items:
-                pending.append(executor.submit(write_shard, prepare_shard(item)))
-                while len(pending) >= max_in_flight:
-                    saved_paths.append(pending.pop(0).result())
-                finished_shard = item[0]
-                host_cache = {
-                    source: value
-                    for source, value in host_cache.items()
-                    if last_use.get(source, -1) > finished_shard
-                }
-            for future in pending:
-                saved_paths.append(future.result())
+            # Release host cache entries no future shard references. The
+            # write above consumed this shard's views, and views held by an
+            # in-flight prefetch pin their own base buffers, so dropping
+            # stale entries here bounds residency at roughly two shards.
+            host_cache = {
+                key: value
+                for key, value in host_cache.items()
+                if last_use.get(key, -1) > shard_index
+            }
 
         if quantization_parameters:
             with open(
