@@ -247,7 +247,6 @@ def test_save_pretrained_writes_full_model_after_lora_merge(tmp_path):
     assert saved_paths == (
         str(tmp_path / 'config.json'),
         str(tmp_path / 'model.safetensors'),
-        str(tmp_path / 'model.safetensors.index.json'),
     )
     assert not (tmp_path / 'adapter_model.safetensors').exists()
     assert not (tmp_path / 'adapter_config.json').exists()
@@ -268,23 +267,18 @@ def test_save_pretrained_without_lora_writes_full_model(tmp_path):
     weights_path = tmp_path / 'model.safetensors'
     index_path = tmp_path / 'model.safetensors.index.json'
     assert weights_path.exists()
-    assert index_path.exists()
+    # A single-shard checkpoint needs no index.
+    assert not index_path.exists()
     assert (tmp_path / 'config.json').exists()
     assert not (tmp_path / 'adapter_model.safetensors').exists()
     assert saved_paths == (
         str(tmp_path / 'config.json'),
         str(tmp_path / 'model.safetensors'),
-        str(tmp_path / 'model.safetensors.index.json'),
     )
 
     with safe_open(weights_path, framework='np') as checkpoint:
         assert set(checkpoint.keys()) == {'proj.weight'}
 
-    with index_path.open() as index_file:
-        index = json.load(index_file)
-    assert index['weight_map'] == {
-        'proj.weight': 'model.safetensors',
-    }
     with (tmp_path / 'config.json').open() as config_file:
         config = json.load(config_file)
     assert config == {
@@ -368,6 +362,35 @@ def test_save_pretrained_round_trips_stacked_qwix_model(tmp_path):
     np.testing.assert_array_equal(
         restored_weight.scale,
         source.layers.stacked.proj.weight.value.scale,
+    )
+
+
+def test_streamed_save_writes_shards_and_index(tmp_path):
+    """Small max_shard_size forces the streaming writer to emit several
+    shards; the index must cover every expanded tensor and the checkpoint
+    must round-trip through load_pretrained."""
+    source = TinyStackedPretrainedModel()
+    saved_paths = source.save_pretrained(tmp_path, max_shard_size=64)
+
+    shards = sorted(
+        entry.name for entry in tmp_path.glob('model-*.safetensors')
+    )
+    assert len(shards) == 2
+    index_path = tmp_path / 'model.safetensors.index.json'
+    assert index_path.is_file()
+    index = json.loads(index_path.read_text())
+    assert set(index['weight_map']) == {
+        'layers.0.proj.weight',
+        'layers.1.proj.weight',
+    }
+    for shard in shards:
+        assert str(tmp_path / shard) in [str(p) for p in saved_paths]
+
+    restored = TinyStackedPretrainedModel()
+    restored.load_pretrained(tmp_path)
+    np.testing.assert_array_equal(
+        restored.layers.stacked.proj.weight.value,
+        source.layers.stacked.proj.weight.value,
     )
 
 
@@ -960,12 +983,8 @@ def test_save_pretrained_expands_full_seqstack_state(tmp_path):
             'layers.0.proj.weight'
         ).shape == (4, 3)
 
-    with (tmp_path / 'model.safetensors.index.json').open() as index_file:
-        index = json.load(index_file)
-    assert index['weight_map'] == {
-        'layers.0.proj.weight': 'model.safetensors',
-        'layers.1.proj.weight': 'model.safetensors',
-    }
+    # Single-shard saves write no index.
+    assert not (tmp_path / 'model.safetensors.index.json').exists()
 
 
 def test_save_pretrained_shards_full_model_at_size_limit(tmp_path):
@@ -1043,9 +1062,8 @@ def test_save_pretrained_replaces_stale_shards(tmp_path):
 
     assert not list(tmp_path.glob('model-*.safetensors'))
     assert (tmp_path / 'model.safetensors').exists()
-    with (tmp_path / 'model.safetensors.index.json').open() as index_file:
-        index = json.load(index_file)
-    assert set(index['weight_map'].values()) == {'model.safetensors'}
+    # The stale sharded index is removed with the shards.
+    assert not (tmp_path / 'model.safetensors.index.json').exists()
 
 
 def test_save_writes_current_transformers_config_after_dtype_override(

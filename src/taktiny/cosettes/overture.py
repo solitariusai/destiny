@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 import typing as tp
+import time
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -20,6 +21,7 @@ import json
 import re
 import tempfile
 import copy
+import collections
 from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
@@ -31,15 +33,28 @@ from huggingface_hub import (
     split_state_dict_into_shards_factory,
 )
 from safetensors.flax import save_file
+import numpy as np
+from safetensors import safe_open
+from ..utils.quantization import (
+    quantize_embedding_weight,
+    quantize_linear_weight,
+    resolve_quantization_rule,
+)
+from huggingface_hub import repo_info
+
+from ..utils.quantization import merge_quantization
+from ..utils.weights import map_state_dict
+from ..utils.logging import is_jax_rank_zero, tqdm
+from ..utils.sharding import create_sharding
 
 from taktiny import nn
 from taktiny.nn.module import iter_children
 from taktiny.utils.format import parse_size
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
+from taktiny.nn.lora import LoRALinear
 
 
 _MISSING = object()
-
 
 @jax.tree_util.register_pytree_node_class
 class ModelOutput(Mapping[str, tp.Any]):
@@ -427,8 +442,6 @@ class PretrainedModel(nn.Module):
         return decoded
 
     def _lora_state_dict(self) -> tp.Any:
-        from taktiny.nn.lora import LoRALinear
-
         state = {}
 
         def collect(module: tp.Any, prefix: str='') -> None:
@@ -565,7 +578,7 @@ class PretrainedModel(nn.Module):
         snapshot: tp.Any,
         path: str,
         *,
-        max_shard_size: str='5GB',
+        max_shard_size: str='10GB',
         module_map: tp.Any=None,
     ) -> tuple[tp.Any, ...]:
         os.makedirs(path, exist_ok=True)
@@ -625,7 +638,7 @@ class PretrainedModel(nn.Module):
             path,
             'model.safetensors',
             max_shard_size=max_shard_size,
-            always_write_index=True,
+            always_write_index=False,
         )
         return (
             model_config_path,
@@ -633,33 +646,37 @@ class PretrainedModel(nn.Module):
             *checkpoint_paths,
         )
 
-    @staticmethod
-    def _expand_stacked_state_dict(state: tp.Any) -> tp.Any:
-        layout = []
-        stacked_groups = {}
+    @classmethod
+    def _expand_stacked_entries(
+        cls,
+        state: tp.Any,
+    ) -> list[tuple[str, str, int | None]]:
+        """Ordered ``(expanded_name, source_name, layer_index)`` triples.
+
+        ``layer_index`` is ``None`` for parameters outside a ``SeqStack``.
+        The name rules mirror ``_expand_stacked_state_dict``, which consumes
+        this layout so both stay in lockstep.
+        """
         grouped_layouts = _grouped_stack_layout(state)
+        layout: list[tuple[str, tp.Any]] = []
+        stacked_groups: dict = {}
 
         for name, value in state.items():
             parts = name.split('.')
             if 'stacked' not in parts:
-                layout.append(('parameter', name, value))
+                layout.append(('parameter', (name, name, None)))
                 continue
 
             stacked_index = parts.index('stacked')
             group_key = (tuple(parts[:stacked_index]), stacked_index)
             if group_key not in stacked_groups:
                 stacked_groups[group_key] = []
-                layout.append(('stack', group_key))
+                layout.append(('group', group_key))
             stacked_groups[group_key].append((parts, value))
 
-        expanded = {}
-        for entry in layout:
-            if entry[0] == 'parameter':
-                _, name, value = entry
-                expanded[name] = value
-                continue
-
-            _, group_key = entry
+        def group_entries(
+            group_key: tuple,
+        ) -> list[tuple[str, str, int]]:
             group = stacked_groups[group_key]
             stacked_index = group_key[1]
             num_layers = None
@@ -678,6 +695,7 @@ class PretrainedModel(nn.Module):
                         f'{value.shape[0]} for {name!r}'
                     )
 
+            entries = []
             for layer_index in range(num_layers):
                 for parts, value in group:
                     layer_parts = list(parts)
@@ -699,9 +717,32 @@ class PretrainedModel(nn.Module):
                         ]
                     else:
                         layer_parts[stacked_index] = str(layer_index)
-                    expanded['.'.join(layer_parts)] = value[layer_index]
+                    entries.append((
+                        '.'.join(layer_parts),
+                        '.'.join(parts),
+                        layer_index,
+                    ))
+            return entries
 
-        return expanded
+        expanded_entries: list[tuple[str, str, int | None]] = []
+        for kind, payload in layout:
+            if kind == 'parameter':
+                expanded_entries.append(payload)
+            else:
+                expanded_entries.extend(group_entries(payload))
+
+        return expanded_entries
+
+    @classmethod
+    def _expand_stacked_state_dict(cls, state: tp.Any) -> tp.Any:
+        return {
+            name: (
+                state[source]
+                if index is None
+                else state[source][index]
+            )
+            for name, source, index in cls._expand_stacked_entries(state)
+        }
 
     @staticmethod
     def _save_safetensors(
@@ -769,10 +810,237 @@ class PretrainedModel(nn.Module):
 
         return tuple(saved_paths)
 
+    @staticmethod
+    def _storage_nbytes(value: tp.Any) -> int:
+        """Bytes ``_encode_qwix_state``/safetensors will emit for ``value``."""
+        if isinstance(value, qwix.QArray):
+            qvalue = value.qvalue
+            dtype = qvalue.dtype
+            if jnp.issubdtype(dtype, jnp.signedinteger):
+                itemsize = 1
+            elif jnp.issubdtype(dtype, jnp.unsignedinteger):
+                itemsize = 1
+            elif jnp.issubdtype(dtype, jnp.floating):
+                itemsize = 2
+            else:
+                raise TypeError(
+                    'Unsupported Qwix qvalue dtype for serialization: '
+                    f'{dtype}'
+                )
+            total = qvalue.size * itemsize + value.scale.nbytes
+            if value.zero_point is not None:
+                total += value.zero_point.size * itemsize
+            return int(total)
+        return int(value.nbytes)
+
+    def _stream_save_pretrained(
+        self,
+        path: str,
+        *,
+        max_shard_size: str='10GB',
+        module_map: tp.Any=None,
+    ) -> tuple[tp.Any, ...]:
+        """Write a full checkpoint shard-by-shard without a full host copy.
+
+        Device tensors are fetched one shard at a time so peak host memory
+        stays at a couple of shards (plus the largest single parameter)
+        instead of the whole model; the fetch of one shard overlaps with the
+        disk write of the previous one.
+        """
+        from taktiny.utils.logging import is_jax_rank_zero
+
+        started = time.perf_counter()
+        os.makedirs(path, exist_ok=True)
+        config_path = os.path.join(path, 'config.json')
+        with open(config_path, 'w') as config_file:
+            json.dump(
+                self._checkpoint_config(),
+                config_file,
+                indent=2,
+                default=str,
+            )
+
+        if module_map is None:
+            module_map = list(
+                getattr(self, 'checkpoint_module_map', None) or []
+            )
+
+        flat = self.flat_state_dict()
+        entries = self._expand_stacked_entries(flat)
+        expanded = {
+            name: (
+                flat[source]
+                if index is None
+                else flat[source][index]
+            )
+            for name, source, index in entries
+        }
+        provenance = {
+            name: (source, index) for name, source, index in entries
+        }
+        # Restore source-format names before planning shards so the written
+        # index matches what `_save_pretrained_snapshot` produces. The
+        # inversion preserves key order, so display and internal names stay
+        # aligned positionally.
+        internal_names = list(expanded.keys())
+        renamed = self._invert_checkpoint_names(expanded, module_map)
+        internal_of_display = dict(zip(renamed.keys(), internal_names))
+
+        split = split_state_dict_into_shards_factory(
+            renamed,
+            get_storage_size=self._storage_nbytes,
+            filename_pattern='model{suffix}.safetensors',
+            max_shard_size=max_shard_size,
+        )
+
+        stem = 'model'
+        extension = '.safetensors'
+        shard_pattern = re.compile(
+            rf'{re.escape(stem)}-\d{{5}}-of-\d{{5}}'
+            rf'{re.escape(extension)}'
+        )
+        for existing_filename in os.listdir(path):
+            if (
+                existing_filename == f'{stem}{extension}'
+                or shard_pattern.fullmatch(existing_filename)
+                or existing_filename == f'{stem}{extension}.index.json'
+                or existing_filename == 'quantization_config.json'
+            ):
+                os.remove(os.path.join(path, existing_filename))
+
+        shard_items = list(split.filename_to_tensors.items())
+        last_use = {}
+        for shard_index, (_, tensor_names) in enumerate(shard_items):
+            for name in tensor_names:
+                source = provenance[internal_of_display[name]][0]
+                last_use[source] = shard_index
+
+        total_bytes = sum(self._storage_nbytes(v) for v in renamed.values())
+        saved_paths = [config_path]
+        quantization_parameters: dict = {}
+        host_cache: dict = {}
+        write_start = time.perf_counter()
+
+        def stabilize(values: tp.Any) -> tp.Any:
+            def copy_leaf(value: tp.Any) -> tp.Any:
+                if isinstance(value, np.ndarray) and not value.flags['OWNDATA']:
+                    return np.array(value, copy=True)
+                return value
+
+            return jax.tree.map(copy_leaf, values)
+
+        def prepare_shard(item: tp.Any) -> tuple[str, dict]:
+            shard_index, (shard_filename, tensor_names) = item
+            needed_sources = list(dict.fromkeys(
+                provenance[internal_of_display[name]][0]
+                for name in tensor_names
+                if provenance[internal_of_display[name]][0] not in host_cache
+            ))
+            if needed_sources:
+                fetch_start = time.perf_counter()
+                fetched = jax.device_get({
+                    source: flat[source]
+                    for source in needed_sources
+                })
+                fetch_seconds = time.perf_counter() - fetch_start
+                host_cache.update(fetched)
+                if is_jax_rank_zero() and (
+                    len(shard_items) > 1 or fetch_seconds >= 0.5
+                ):
+                    print(
+                        f'[taktiny] shard {shard_index + 1}/'
+                        f'{len(shard_items)}: fetched device tensors '
+                        f'in {fetch_seconds:.1f}s'
+                    )
+            # Build under internal spellings; the single inversion below
+            # restores source-format names exactly like the eager path.
+            shard_state = {}
+            for name in tensor_names:
+                internal = internal_of_display[name]
+                source, index = provenance[internal]
+                value = host_cache[source]
+                shard_state[internal] = value if index is None else value[index]
+            stabilized = stabilize(shard_state)
+            inverted = self._invert_checkpoint_names(stabilized, module_map)
+            encoded, metadata = self._encode_qwix_state(inverted)
+            if metadata is not None:
+                quantization_parameters.update(metadata['parameters'])
+            return shard_filename, encoded
+
+        prepared_items = enumerate(shard_items)
+
+        def write_shard(prepared: tuple[str, dict]) -> str:
+            shard_filename, encoded = prepared
+            shard_path = os.path.join(path, shard_filename)
+            save_file(encoded, shard_path)
+            return shard_path
+
+        # Writes contend on one disk; more than two writers rarely helps and
+        # can degrade I/O. In-flight shards are capped so peak host memory
+        # stays at a couple of shards (fetch of shard N+1 overlaps the write
+        # of shard N), not at workers x shard size.
+        workers = max(1, min(len(shard_items), 2))
+        max_in_flight = workers + 1
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            pending = []
+            for item in prepared_items:
+                pending.append(executor.submit(write_shard, prepare_shard(item)))
+                while len(pending) >= max_in_flight:
+                    saved_paths.append(pending.pop(0).result())
+                finished_shard = item[0]
+                host_cache = {
+                    source: value
+                    for source, value in host_cache.items()
+                    if last_use.get(source, -1) > finished_shard
+                }
+            for future in pending:
+                saved_paths.append(future.result())
+
+        if quantization_parameters:
+            with open(
+                os.path.join(path, 'quantization_config.json'),
+                'w',
+            ) as quantization_file:
+                json.dump(
+                    {
+                        'format': 'taktiny-qwix',
+                        'version': 1,
+                        'parameters': quantization_parameters,
+                    },
+                    quantization_file,
+                    indent=2,
+                )
+            saved_paths.insert(1, os.path.join(path, 'quantization_config.json'))
+
+        if split.is_sharded:
+            index_path = os.path.join(
+                path,
+                f'{stem}{extension}.index.json',
+            )
+            with open(index_path, 'w') as index_file:
+                json.dump(
+                    {
+                        'metadata': split.metadata,
+                        'weight_map': split.tensor_to_filename,
+                    },
+                    index_file,
+                    indent=2,
+                )
+            saved_paths.append(index_path)
+
+        if is_jax_rank_zero():
+            print(
+                f'[taktiny] checkpoint written to {path}: '
+                f'{total_bytes / 1e9:.2f} GB in '
+                f'{time.perf_counter() - write_start:.1f}s '
+                f'(total {time.perf_counter() - started:.1f}s)'
+            )
+        return tuple(saved_paths)
+
     def save_pretrained(
         self,
         path: str,
-        max_shard_size: str='50GB',
+        max_shard_size: str='10GB',
         module_map: tp.Any=None,
     ) -> tp.Any:
         """Save a full model checkpoint or the model's LoRA adapters.
@@ -801,8 +1069,15 @@ class PretrainedModel(nn.Module):
             configuration files first, followed by weight files and their
             index when present.
         """
-        return self._save_pretrained_snapshot(
-            self._checkpoint_snapshot(),
+        if self._lora_state_dict():
+            # Adapters are tiny; the eager snapshot path is fine for them.
+            return self._save_pretrained_snapshot(
+                self._checkpoint_snapshot(),
+                path,
+                max_shard_size=max_shard_size,
+                module_map=module_map,
+            )
+        return self._stream_save_pretrained(
             path,
             max_shard_size=max_shard_size,
             module_map=module_map,
@@ -816,14 +1091,17 @@ class PretrainedModel(nn.Module):
         parameters without applying external checkpoint name mappings or
         matrix transpositions.
 
+        Tensors are streamed shard-by-shard: each tensor is routed and
+        placed (or assembled into its SeqStack buffer) as soon as it is
+        read, so peak host memory is bounded by the largest single
+        parameter plus one in-flight stack instead of the whole checkpoint.
+
         Args:
             path: Local directory containing model Safetensors.
 
         Returns:
             This model instance.
         """
-        from safetensors import safe_open
-
         path = os.fspath(path)
         quantization_path = os.path.join(
             path,
@@ -851,10 +1129,185 @@ class PretrainedModel(nn.Module):
 
         parameters = self.flat_parameter_dict()
         grouped_layouts = _grouped_stack_layout(parameters)
-        checkpoint_state = {}
-        loaded = {}
-        stacked_parameters = {}
+
+        quantization_specs = {}
+        if quantization_metadata is not None:
+            if (
+                quantization_metadata.get('format') != 'taktiny-qwix'
+                or quantization_metadata.get('version') != 1
+            ):
+                raise ValueError(
+                    'Unsupported Qwix checkpoint metadata format'
+                )
+            specs = quantization_metadata.get('parameters')
+            if not isinstance(specs, dict):
+                raise ValueError(
+                    'Qwix checkpoint metadata has no parameter mapping'
+                )
+            quantization_specs = specs
+
+        seen_names: set = set()
         unexpected = []
+        loaded_names: set = set()
+        stacked_entries: dict = {}
+        component_buffers: dict = {}
+
+        def decode_qarray(base: str, parts: dict) -> tp.Any:
+            specification = quantization_specs[base]
+            qvalue_dtype = jnp.dtype(specification['qvalue_dtype'])
+            qvalue = parts['qvalue'].astype(qvalue_dtype)
+            zero_point = None
+            if 'zero_point' in parts:
+                zero_point = parts['zero_point'].astype(qvalue_dtype)
+            return qwix.QArray(
+                qvalue=qvalue,
+                scale=parts['scale'],
+                zero_point=zero_point,
+                qtype=specification.get('qtype'),
+            )
+
+        def place_value(name: str, value: tp.Any) -> None:
+            parameter = parameters[name]
+            if (
+                isinstance(parameter.value, qwix.QArray)
+                and not isinstance(value, qwix.QArray)
+            ):
+                raise TypeError(
+                    'Loading a dense native checkpoint into an existing '
+                    f'quantized parameter is unsupported: {name}'
+                )
+            if isinstance(value, qwix.QArray):
+                target = parameter.value
+
+                def place(
+                    component: tp.Any,
+                    target_component: tp.Any=None,
+                ) -> tp.Any:
+                    component = jnp.asarray(component)
+                    sharding = getattr(target_component, 'sharding', None)
+                    if sharding is not None:
+                        component = jax.device_put(component, sharding)
+                    return component
+
+                if isinstance(target, qwix.QArray):
+                    parameter.value = qwix.QArray(
+                        qvalue=place(value.qvalue, target.qvalue),
+                        scale=place(value.scale, target.scale),
+                        zero_point=(
+                            place(value.zero_point, target.zero_point)
+                            if value.zero_point is not None
+                            else None
+                        ),
+                        qtype=value.qtype,
+                    )
+                else:
+                    parameter.value = jax.tree.map(place, value)
+                loaded_names.add(name)
+                return
+
+            array = jnp.asarray(value, dtype=parameter.dtype)
+            sharding = getattr(parameter.value, 'sharding', None)
+            if sharding is not None:
+                array = jax.device_put(array, sharding)
+            parameter.value = array
+            loaded_names.add(name)
+
+        def finalize_stacked(stacked_name: str) -> None:
+            entry = stacked_entries[stacked_name]
+            parameter = parameters[stacked_name]
+            expected_indices = set(range(parameter.shape[0]))
+            if entry['indices'] != expected_indices:
+                return
+            ordered = [
+                entry['values'][index]
+                for index in range(parameter.shape[0])
+            ]
+            if isinstance(ordered[0], qwix.QArray):
+                value = jax.tree.map(
+                    lambda *values: jnp.stack(values),
+                    *ordered,
+                )
+            else:
+                value = np.stack(ordered)
+            del entry['values']
+            place_value(stacked_name, value)
+            del stacked_entries[stacked_name]
+
+        def handle_assembled(name: str, value: tp.Any) -> None:
+            if name in seen_names:
+                raise ValueError(
+                    f'Duplicate model tensor in checkpoint: {name}'
+                )
+            seen_names.add(name)
+
+            if name in parameters:
+                parameter = parameters[name]
+                if value.shape != parameter.shape:
+                    raise ValueError(
+                        f'Model tensor {name!r} has shape '
+                        f'{value.shape}, expected {parameter.shape}'
+                    )
+                place_value(name, value)
+                return
+
+            resolved = _resolve_stacked_parameter(
+                name,
+                parameters,
+                grouped_layouts,
+            )
+            if resolved is None:
+                unexpected.append(name)
+                return
+            stacked_name, layer_index = resolved
+            parameter = parameters[stacked_name]
+            expected_shape = parameter.shape[1:]
+            if value.shape != expected_shape:
+                raise ValueError(
+                    f'Model tensor {name!r} has shape '
+                    f'{value.shape}, expected {expected_shape}'
+                )
+            entry = stacked_entries.setdefault(
+                stacked_name,
+                {'values': {}, 'indices': set()},
+            )
+            if layer_index in entry['indices']:
+                raise ValueError(
+                    f'Duplicate model layer tensor: {name}'
+                )
+            entry['values'][layer_index] = value
+            entry['indices'].add(layer_index)
+            finalize_stacked(stacked_name)
+
+        def handle_tensor(name: str, value: tp.Any) -> None:
+            base, separator, component = name.rpartition('.__qwix__.')
+            if not separator or component not in (
+                'qvalue',
+                'scale',
+                'zero_point',
+            ) or base not in quantization_specs:
+                handle_assembled(name, value)
+                return
+
+            specification = quantization_specs[base]
+            required = ['qvalue', 'scale']
+            if specification.get('zero_point') is not None:
+                required.append('zero_point')
+            parts = component_buffers.setdefault(base, {})
+            if component in parts:
+                raise ValueError(
+                    f'Duplicate model tensor in checkpoint: {name}'
+                )
+            parts[component] = value
+            if all(part in parts for part in required):
+                del component_buffers[base]
+                try:
+                    decoded = decode_qarray(base, parts)
+                except KeyError as error:
+                    raise ValueError(
+                        f'Qwix checkpoint metadata is missing dtype for '
+                        f'{base!r}'
+                    ) from error
+                handle_assembled(base, decoded)
 
         for filename in filenames:
             checkpoint_path = os.path.join(path, filename)
@@ -868,56 +1321,14 @@ class PretrainedModel(nn.Module):
                 device='cpu',
             ) as checkpoint:
                 for name in checkpoint.keys():
-                    if name in checkpoint_state:
-                        raise ValueError(
-                            f'Duplicate model tensor in checkpoint: {name}'
-                        )
-                    checkpoint_state[name] = checkpoint.get_tensor(name)
+                    handle_tensor(name, checkpoint.get_tensor(name))
 
-        checkpoint_state = self._decode_qwix_state(
-            checkpoint_state,
-            quantization_metadata,
-        )
-        for name, value in checkpoint_state.items():
-            if name in parameters:
-                parameter = parameters[name]
-                if value.shape != parameter.shape:
-                    raise ValueError(
-                        f'Model tensor {name!r} has shape '
-                        f'{value.shape}, expected {parameter.shape}'
-                    )
-                loaded[name] = value
-                continue
-
-            matched_stack = False
-            resolved = _resolve_stacked_parameter(
-                name,
-                parameters,
-                grouped_layouts,
+        if component_buffers:
+            missing_group = sorted(component_buffers)[0]
+            raise ValueError(
+                f'Qwix parameter {missing_group!r} is missing components '
+                'in the checkpoint'
             )
-            if resolved is not None:
-                stacked_name, layer_index = resolved
-                parameter = parameters[stacked_name]
-                expected_shape = parameter.shape[1:]
-                if value.shape != expected_shape:
-                    raise ValueError(
-                        f'Model tensor {name!r} has shape '
-                        f'{value.shape}, expected {expected_shape}'
-                    )
-                entry = stacked_parameters.setdefault(
-                    stacked_name,
-                    {'values': {}, 'indices': set()},
-                )
-                if layer_index in entry['indices']:
-                    raise ValueError(
-                        f'Duplicate model layer tensor: {name}'
-                    )
-                entry['values'][layer_index] = value
-                entry['indices'].add(layer_index)
-                matched_stack = True
-
-            if not matched_stack:
-                unexpected.append(name)
 
         if unexpected:
             preview = ', '.join(sorted(unexpected)[:8])
@@ -925,75 +1336,22 @@ class PretrainedModel(nn.Module):
                 f'Model checkpoint contains unexpected tensors: {preview}'
             )
 
-        for name, entry in stacked_parameters.items():
-            parameter = parameters[name]
-            expected_indices = set(range(parameter.shape[0]))
-            missing_indices = expected_indices - entry['indices']
+        for stacked_name, entry in stacked_entries.items():
+            parameter = parameters[stacked_name]
+            missing_indices = set(range(parameter.shape[0])) - entry['indices']
             if missing_indices:
                 missing = ', '.join(map(str, sorted(missing_indices)))
                 raise ValueError(
                     f'Model checkpoint is missing layers {missing} '
-                    f'for {name!r}'
+                    f'for {stacked_name!r}'
                 )
-            ordered = [
-                entry['values'][index]
-                for index in range(parameter.shape[0])
-            ]
-            if isinstance(ordered[0], qwix.QArray):
-                loaded[name] = jax.tree.map(
-                    lambda *values: jnp.stack(values),
-                    *ordered,
-                )
-            else:
-                loaded[name] = np.stack(ordered)
 
-        missing = sorted(set(parameters) - set(loaded))
+        missing = sorted(set(parameters) - loaded_names)
         if missing:
             preview = ', '.join(missing[:8])
             raise ValueError(
                 f'Model checkpoint is missing tensors: {preview}'
             )
-
-        for name, value in loaded.items():
-            parameter = parameters[name]
-            if (
-                isinstance(parameter.value, qwix.QArray)
-                and not isinstance(value, qwix.QArray)
-            ):
-                raise TypeError(
-                    'Loading a dense native checkpoint into an existing '
-                    f'quantized parameter is unsupported: {name}'
-                )
-            if isinstance(value, qwix.QArray):
-                target = parameter.value
-
-                def place(component: tp.Any, target_component: tp.Any=None) -> tp.Any:
-                    component = jnp.asarray(component)
-                    sharding = getattr(target_component, 'sharding', None)
-                    if sharding is not None:
-                        component = jax.device_put(component, sharding)
-                    return component
-
-                if isinstance(target, qwix.QArray):
-                    value = qwix.QArray(
-                        qvalue=place(value.qvalue, target.qvalue),
-                        scale=place(value.scale, target.scale),
-                        zero_point=(
-                            place(value.zero_point, target.zero_point)
-                            if value.zero_point is not None
-                            else None
-                        ),
-                        qtype=value.qtype,
-                    )
-                else:
-                    value = jax.tree.map(place, value)
-                parameter.value = value
-                continue
-            array = jnp.asarray(value, dtype=parameter.dtype)
-            sharding = getattr(parameter.value, 'sharding', None)
-            if sharding is not None:
-                array = jax.device_put(array, sharding)
-            parameter.value = array
 
         return self
 
@@ -1010,7 +1368,6 @@ class PretrainedModel(nn.Module):
             A human-readable report with a per-device breakdown, logical
             bytes grouped by placement kind, and a logical total.
         """
-        import collections
 
         per_device: tp.Any = collections.Counter()
         by_kind: tp.Any = collections.Counter()
@@ -1182,7 +1539,7 @@ class PretrainedModel(nn.Module):
         sharding_rules: LogicalRules | None = None,
         allow_unmatched: bool = False,
         show_progress: bool = True,
-        load_chunk_size: int | str | None = '100GB',
+        load_chunk_size: int | str | None = '1GB',
         **kwargs,
     ) -> tp.Any:
         """
@@ -1243,8 +1600,6 @@ class PretrainedModel(nn.Module):
                     else getattr(dtype, 'name', str(dtype))
                 )
         if quant is not None and uniform_quant is not None:
-            from ..utils.quantization import merge_quantization
-
             set_config_override(
                 'quant',
                 merge_quantization(quant, uniform_quant),
@@ -1291,7 +1646,6 @@ class PretrainedModel(nn.Module):
             if os.path.exists(index_path):
                 is_sharded = True
         else:
-            from huggingface_hub import repo_info
             try:
                 info = repo_info(repo_id=path_or_repo_str)
                 files = [f.rfilename for f in info.siblings]
@@ -1382,16 +1736,6 @@ class PretrainedModel(nn.Module):
         not_found_some = False
 
         # 5. Load weights
-        import numpy as np
-        from safetensors import safe_open
-        from ..utils.quantization import (
-            quantize_embedding_weight,
-            quantize_linear_weight,
-            resolve_quantization_rule,
-        )
-        from ..utils.weights import map_state_dict
-        from ..utils.logging import is_jax_rank_zero, tqdm
-
         cpu_device = jax.devices('cpu')[0]
         default_device = jax.devices()[0]
         quantizers: dict[tuple[tp.Any, ...], tp.Callable[[tp.Any], tp.Any]] = {}
@@ -1471,8 +1815,6 @@ class PretrainedModel(nn.Module):
                 and axis_names is not None
                 and mesh is not None
             ):
-                from ..utils.sharding import create_sharding
-
                 sharding = create_sharding(
                     mesh,
                     axis_names,
