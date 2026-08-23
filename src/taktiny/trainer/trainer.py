@@ -476,11 +476,13 @@ class Trainer:
         dataset_config: DatasetConfig,
         *,
         loss_fn: LossFn,
+        loss_has_aux: bool = False,
         callbacks: Iterable[Any] | Any | None = None,
         compute_metrics: Callable[..., Mapping[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
+        self.loss_has_aux = loss_has_aux
         self.training_config = training_config
         self.dataset_config = dataset_config
         self._train_dataloader = dataset_config.train_dataloader
@@ -1975,13 +1977,18 @@ class Trainer:
             current_loss_scale: Any,
             rng: Any,
         ) -> tuple[Any, ...]:
-            loss = calculate_loss(
+            result = calculate_loss(
                 candidate_trainable,
                 current_frozen,
                 batch,
                 rng,
             )
-            return loss * current_loss_scale, loss
+            if self.loss_has_aux:
+                loss, metrics = result
+                return loss * current_loss_scale, (loss, metrics)
+            else:
+                loss = result
+                return loss * current_loss_scale, loss
 
         loss_and_grad = jax.value_and_grad(scaled_loss, has_aux=True)
 
@@ -1992,7 +1999,7 @@ class Trainer:
             current_loss_scale: Any,
             rng: Any,
         ) -> tuple[Any, ...]:
-            (_, loss), grads = loss_and_grad(
+            (_, aux_data), grads = loss_and_grad(
                 current_trainable,
                 current_frozen,
                 batch,
@@ -2006,7 +2013,7 @@ class Trainer:
                     ),
                     grads,
                 )
-            return loss, grads
+            return aux_data, grads
 
         def optimizer_step(current_trainable: Any, current_opt_state: Any, grads: Any) -> tuple[Any, ...]:
             updates, new_opt_state = optimizer.update(
@@ -2107,6 +2114,8 @@ class Trainer:
             )
         )
 
+        
+        step_metrics = {}
         with Progress(
             *progress_columns,
             console=console,
@@ -2122,6 +2131,8 @@ class Trainer:
             def finish_accumulation(current_epoch: Any, current_step_in_epoch: Any) -> None:
                 nonlocal accumulated_grads
                 nonlocal accumulated_loss
+                nonlocal accumulated_metrics
+                nonlocal step_metrics
                 nonlocal accumulated_microbatches
                 nonlocal compiled_optimizer_step
                 nonlocal grad_norm
@@ -2154,6 +2165,10 @@ class Trainer:
                     is_leaf=lambda value: value is None,
                 )
                 averaged_loss = accumulated_loss / divisor
+                if accumulated_metrics is not None:
+                    step_metrics = jax.tree.map(lambda v: v / divisor, accumulated_metrics)
+                else:
+                    step_metrics = {}
                 # The grad norm is only computed when it is needed: to clip
                 # with max_grad_norm, or to track/report it. Computing it reads
                 # every gradient leaf and keeps the averaged tree alive while
@@ -2289,6 +2304,8 @@ class Trainer:
                     'loss_scale': self.loss_scale,
                     'skipped_update': update_skipped,
                 }
+                for k, v in step_metrics.items():
+                    step_logs[k] = float(v)
                 if not update_skipped:
                     self._after_optimizer_step(
                         _combine_params(
@@ -2313,7 +2330,9 @@ class Trainer:
 
                 accumulated_grads = None
                 accumulated_loss = None
+                accumulated_metrics = None
                 accumulated_microbatches = 0
+                
 
                 if step % self.training_config.log_interval == 0:
                     elapsed = time.time() - start_time
@@ -2338,11 +2357,15 @@ class Trainer:
                         if learning_rate is not None
                         else ''
                     )
+                    custom_text = ""
+                    for k, v in step_metrics.items():
+                        custom_text += f" [dim]┃ {k}:[/dim] [yellow]{float(v):.4f}[/yellow]"
+                        
                     progress.console.print(
                         f"[bold cyan]Step {step:<6}[/bold cyan] "
                         f"[dim]┃ Loss:[/dim] "
                         f"[bold white]{loss_text}[/bold white]"
-                        f"{learning_rate_text} [dim]┃ "
+                        f"{learning_rate_text}{custom_text} [dim]┃ "
                         f"{iteration_time:>11}[/dim]"
                     )
                     start_time = time.time()
@@ -2453,6 +2476,7 @@ class Trainer:
                 use_fused_accumulation = (
                     self.training_config.jit_compile
                     and accumulation_steps > 1
+                    and not self.loss_has_aux
                 )
                 if use_fused_accumulation:
                     # Fused microbatch loop: all microbatches of one optimizer
@@ -2617,7 +2641,7 @@ class Trainer:
                         current_gradient_step = (
                             compiled_gradient_step or gradient_step
                         )
-                        microbatch_loss, microbatch_grads = (
+                        microbatch_aux, microbatch_grads = (
                             current_gradient_step(
                                 trainable_params,
                                 frozen_params,
@@ -2632,11 +2656,16 @@ class Trainer:
                                 ),
                             )
                         )
+                        if self.loss_has_aux:
+                            microbatch_loss, microbatch_metrics = microbatch_aux
+                        else:
+                            microbatch_loss = microbatch_aux
+                            microbatch_metrics = {}
+
                         if accumulated_grads is None:
                             accumulated_grads = microbatch_grads
-                            accumulated_loss = microbatch_loss.astype(
-                                jnp.float32
-                            )
+                            accumulated_loss = microbatch_loss.astype(jnp.float32)
+                            accumulated_metrics = jax.tree.map(lambda x: x.astype(jnp.float32), microbatch_metrics)
                         else:
                             accumulated_grads = _accumulate_grads(
                                 accumulated_grads,
@@ -2646,6 +2675,12 @@ class Trainer:
                                 accumulated_loss
                                 + microbatch_loss.astype(jnp.float32)
                             )
+                            if accumulated_metrics is not None:
+                                accumulated_metrics = jax.tree.map(
+                                    lambda a, b: a + b.astype(jnp.float32), 
+                                    accumulated_metrics, 
+                                    microbatch_metrics
+                                )
                         accumulated_microbatches += 1
                         self.micro_step += 1
                         microbatches_run_this_call += 1
