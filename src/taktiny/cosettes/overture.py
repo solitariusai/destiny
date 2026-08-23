@@ -369,78 +369,6 @@ class PretrainedModel(nn.Module):
             }
         return encoded, metadata
 
-    @staticmethod
-    def _decode_qwix_state(state: tp.Any, metadata: tp.Any) -> tp.Any:
-        if metadata is None:
-            return state
-        if (
-            metadata.get('format') != 'taktiny-qwix'
-            or metadata.get('version') != 1
-        ):
-            raise ValueError('Unsupported Qwix checkpoint metadata format')
-        parameters = metadata.get('parameters')
-        if not isinstance(parameters, dict):
-            raise ValueError(
-                'Qwix checkpoint metadata has no parameter mapping'
-            )
-
-        decoded = dict(state)
-        for name, specification in parameters.items():
-            if not isinstance(specification, dict):
-                raise ValueError(
-                    f'Invalid Qwix metadata for parameter {name!r}'
-                )
-            component_names = (
-                specification.get('qvalue'),
-                specification.get('scale'),
-                specification.get('zero_point'),
-            )
-            required = component_names[:2]
-            missing = [
-                component
-                for component in required
-                if component not in decoded
-            ]
-            if missing:
-                raise ValueError(
-                    f'Qwix parameter {name!r} is missing components: '
-                    f'{", ".join(missing)}'
-                )
-
-            qvalue = decoded.pop(component_names[0])
-            scale = decoded.pop(component_names[1])
-            zero_point = None
-            if component_names[2] is not None:
-                if component_names[2] not in decoded:
-                    raise ValueError(
-                        f'Qwix parameter {name!r} is missing component '
-                        f'{component_names[2]!r}'
-                    )
-                zero_point = decoded.pop(component_names[2])
-
-            qvalue_dtype = specification.get('qvalue_dtype')
-            if not isinstance(qvalue_dtype, str):
-                raise ValueError(
-                    f'Qwix parameter {name!r} has no qvalue dtype'
-                )
-            try:
-                qvalue_dtype = jnp.dtype(qvalue_dtype)
-            except TypeError as error:
-                raise ValueError(
-                    f'Qwix parameter {name!r} has unsupported qvalue dtype '
-                    f'{qvalue_dtype!r}'
-                ) from error
-            qvalue = jnp.asarray(qvalue).astype(qvalue_dtype)
-            if zero_point is not None:
-                zero_point = jnp.asarray(zero_point).astype(qvalue_dtype)
-            decoded[name] = qwix.QArray(
-                qvalue=qvalue,
-                scale=jnp.asarray(scale),
-                zero_point=zero_point,
-                qtype=specification.get('qtype'),
-            )
-        return decoded
-
     def _lora_state_dict(self) -> tp.Any:
         state = {}
 
@@ -811,6 +739,16 @@ class PretrainedModel(nn.Module):
         return tuple(saved_paths)
 
     @staticmethod
+    def _resident_nbytes(value: tp.Any) -> int:
+        """Host/device bytes actually occupied by ``value``."""
+        if isinstance(value, qwix.QArray):
+            total = int(value.qvalue.nbytes) + int(value.scale.nbytes)
+            if value.zero_point is not None:
+                total += int(value.zero_point.nbytes)
+            return total
+        return int(value.nbytes)
+
+    @staticmethod
     def _storage_nbytes(value: tp.Any) -> int:
         """Bytes ``_encode_qwix_state``/safetensors will emit for ``value``."""
         if isinstance(value, qwix.QArray):
@@ -842,10 +780,11 @@ class PretrainedModel(nn.Module):
     ) -> tuple[tp.Any, ...]:
         """Write a full checkpoint shard-by-shard without a full host copy.
 
-        Device tensors are fetched one shard at a time so peak host memory
-        stays at a couple of shards (plus the largest single parameter)
-        instead of the whole model; the fetch of one shard overlaps with the
-        disk write of the previous one.
+        Device tensors are fetched one shard at a time, and stacked
+        parameters transfer only the contiguous layer ranges each shard
+        uses, so peak host memory stays at a couple of shards instead of
+        the whole model; the fetch of one shard overlaps with the disk
+        write of the previous one.
         """
         from taktiny.utils.logging import is_jax_rank_zero
 
@@ -909,13 +848,22 @@ class PretrainedModel(nn.Module):
                 os.remove(os.path.join(path, existing_filename))
 
         shard_items = list(split.filename_to_tensors.items())
+        # Cache keys are (source, layer_index) pairs, or (source, None) for
+        # parameters outside a SeqStack; eviction is keyed the same way so a
+        # stacked tensor only stays resident while some layer of it is still
+        # needed by a future shard.
         last_use = {}
         for shard_index, (_, tensor_names) in enumerate(shard_items):
             for name in tensor_names:
-                source = provenance[internal_of_display[name]][0]
-                last_use[source] = shard_index
+                key = provenance[internal_of_display[name]]
+                last_use[key] = shard_index
 
         total_bytes = sum(self._storage_nbytes(v) for v in renamed.values())
+        if is_jax_rank_zero() and len(shard_items) > 1:
+            print(
+                f'[taktiny] planning save: {len(shard_items)} shards, '
+                f'~{total_bytes / 1e9:.2f} GB'
+            )
         saved_paths = [config_path]
         quantization_parameters: dict = {}
         host_cache: dict = {}
@@ -936,50 +884,112 @@ class PretrainedModel(nn.Module):
 
             return jax.tree.map(copy_leaf, values)
 
-        def prepare_shard(item: tp.Any) -> tuple[str, dict]:
+        def prepare_shard(item: tp.Any) -> tuple[str, dict, float]:
             shard_index, (shard_filename, tensor_names) = item
-            needed_sources = list(dict.fromkeys(
-                provenance[internal_of_display[name]][0]
+            requested_bytes = sum(
+                self._storage_nbytes(expanded[internal_of_display[name]])
                 for name in tensor_names
-                if provenance[internal_of_display[name]][0] not in host_cache
-            ))
-            if needed_sources:
+            )
+            needs: dict = {}
+            for name in tensor_names:
+                key = provenance[internal_of_display[name]]
+                needs.setdefault(key[0], set()).add(key[1])
+
+            # Fetch only the layer ranges this shard actually uses: a
+            # stacked tensor is transferred as contiguous [lo:hi] device
+            # slices so shard size bounds host residency even when a stack
+            # spans several shards.
+            to_fetch: dict = {}
+            fetched_bytes = 0
+            for source, indices in needs.items():
+                if None in indices:
+                    if (source, None) not in host_cache:
+                        to_fetch[(source, None)] = flat[source]
+                        fetched_bytes += self._resident_nbytes(flat[source])
+                    continue
+                run_start = None
+                previous = None
+                for index in sorted(indices):
+                    if (source, index) in host_cache:
+                        continue
+                    if previous is None or index != previous + 1:
+                        if previous is not None:
+                            to_fetch[(
+                                source,
+                                run_start,
+                                previous,
+                            )] = flat[source][run_start:previous + 1]
+                            fetched_bytes += self._resident_nbytes(
+                                flat[source][run_start:previous + 1]
+                            )
+                        run_start = index
+                    previous = index
+                if previous is not None:
+                    to_fetch[(source, run_start, previous)] = flat[source][
+                        run_start:previous + 1
+                    ]
+                    fetched_bytes += self._resident_nbytes(
+                        flat[source][run_start:previous + 1]
+                    )
+
+            d2h_seconds = 0.0
+            if to_fetch:
                 fetch_start = time.perf_counter()
-                fetched = jax.device_get({
-                    source: flat[source]
-                    for source in needed_sources
-                })
-                fetch_seconds = time.perf_counter() - fetch_start
-                host_cache.update(fetched)
+                fetched = jax.device_get(to_fetch)
+                d2h_seconds = time.perf_counter() - fetch_start
+                for key, block in fetched.items():
+                    if len(key) == 2:
+                        host_cache[key] = block
+                    else:
+                        _, lo, hi = key
+                        for offset in range(hi - lo + 1):
+                            host_cache[(key[0], lo + offset)] = block[offset]
                 if is_jax_rank_zero() and (
-                    len(shard_items) > 1 or fetch_seconds >= 0.5
+                    len(shard_items) > 1 or d2h_seconds >= 0.5
                 ):
+                    cache_bytes = sum(
+                        self._resident_nbytes(value)
+                        for value in host_cache.values()
+                    )
                     print(
                         f'[taktiny] shard {shard_index + 1}/'
-                        f'{len(shard_items)}: fetched device tensors '
-                        f'in {fetch_seconds:.1f}s'
+                        f'{len(shard_items)}: D2H {d2h_seconds:.1f}s | '
+                        f'fetched {fetched_bytes / 1e6:.0f}MB of '
+                        f'{requested_bytes / 1e6:.0f}MB requested | '
+                        f'host cache {cache_bytes / 1e6:.0f}MB'
                     )
+
             # Build under internal spellings; the single inversion below
             # restores source-format names exactly like the eager path.
+            prep_start = time.perf_counter()
             shard_state = {}
             for name in tensor_names:
                 internal = internal_of_display[name]
                 source, index = provenance[internal]
-                value = host_cache[source]
-                shard_state[internal] = value if index is None else value[index]
+                shard_state[internal] = host_cache[(source, index)]
             stabilized = stabilize(shard_state)
             inverted = self._invert_checkpoint_names(stabilized, module_map)
             encoded, metadata = self._encode_qwix_state(inverted)
             if metadata is not None:
                 quantization_parameters.update(metadata['parameters'])
-            return shard_filename, encoded
+            return (
+                shard_filename,
+                encoded,
+                time.perf_counter() - prep_start,
+            )
 
         prepared_items = enumerate(shard_items)
 
-        def write_shard(prepared: tuple[str, dict]) -> str:
-            shard_filename, encoded = prepared
+        def write_shard(prepared: tuple[str, dict, float]) -> str:
+            shard_filename, encoded, _ = prepared
             shard_path = os.path.join(path, shard_filename)
+            write_shard_start = time.perf_counter()
             save_file(encoded, shard_path)
+            if is_jax_rank_zero() and len(shard_items) > 1:
+                print(
+                    f'[taktiny] wrote {shard_filename} in '
+                    f'{time.perf_counter() - write_shard_start:.1f}s'
+                )
             return shard_path
 
         # Writes contend on one disk; more than two writers rarely helps and
