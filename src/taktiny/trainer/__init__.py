@@ -17,3 +17,5 @@ from .config import *
 from .callbacks import *
 from .loss import *
 from .sft import *
+from .dpo import *
+from .grpo import *
