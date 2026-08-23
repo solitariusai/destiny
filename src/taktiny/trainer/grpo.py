@@ -117,7 +117,7 @@ def create_grpo_loss_fn(
         loss = jnp.sum(token_loss * loss_mask) / jnp.maximum(valid_tokens, 1.0)
         
         metrics = {
-            'ppo_loss': -jnp.sum(grpo_clipped_objective * loss_mask) / jnp.maximum(valid_tokens, 1.0),
+            'grpo_loss': -jnp.sum(grpo_clipped_objective * loss_mask) / jnp.maximum(valid_tokens, 1.0),
             'kl_div': jnp.sum(kl * loss_mask) / jnp.maximum(valid_tokens, 1.0),
             'clip_fraction': jnp.sum((jnp.abs(ratio - 1.0) > clip_ratio) * loss_mask) / jnp.maximum(valid_tokens, 1.0),
             'ratio': jnp.sum(ratio * loss_mask) / jnp.maximum(valid_tokens, 1.0),
