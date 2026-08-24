@@ -399,8 +399,9 @@ class PretrainedModel(nn.Module):
 
         return jax.tree.map(stabilize_leaf, hosted)
 
+    # TODO: refactor _invert_checkpoint_names
     @staticmethod
-    def _invert_checkpoint_names(state: tp.Any, module_map: tp.Any) -> tp.Any:
+    def _invert_checkpoint_names(state: tp.Dict, module_map: tp.List) -> tp.Any:
         """Restore source-format checkpoint tensor names for saving.
 
         The mapping rules applied while loading are undone in reverse order.
@@ -503,7 +504,7 @@ class PretrainedModel(nn.Module):
     @classmethod
     def _save_pretrained_snapshot(
         cls,
-        snapshot: tp.Any,
+        snapshot: tp.Dict,
         path: str,
         *,
         max_shard_size: str='10GB',
@@ -674,9 +675,9 @@ class PretrainedModel(nn.Module):
 
     @staticmethod
     def _save_safetensors(
-        state: tp.Any,
-        path: str,
-        filename: tp.Any,
+        state: tp.Dict,
+        path: PathLike,
+        filename: str,
         *,
         max_shard_size: int,
         always_write_index: bool=False,

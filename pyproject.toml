@@ -10,10 +10,16 @@ dependencies = [
     "grain>=0.2.18",
     "huggingface-hub>=1.22.0",
     "jax>=0.10.2",
+    "maturin>=1.14.1",
     "orbax-checkpoint>=0.12.1",
     "qwix>=0.1.8",
     "safetensors>=0.8.0",
     "transformers>=5.13.0",
+]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
 ]
 
 [project.optional-dependencies]
@@ -22,8 +28,9 @@ wandb = ["wandb"]
 reporting = ["tensorboardX", "wandb"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["hatchling", "maturin>=1.14,<2.0"]
+# build-backend = "hatchling.build"
+build-backend = "maturin"
 
 [dependency-groups]
 dev = [
@@ -40,4 +47,12 @@ dev = [
 markers = [
     "gpu: requires a JAX GPU backend",
     "tpu: requires a JAX TPU backend",
+]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+    { file = "src/**/*.rs" },
 ]
