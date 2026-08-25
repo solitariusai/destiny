@@ -49,6 +49,10 @@ markers = [
     "tpu: requires a JAX TPU backend",
 ]
 
+[tool.maturin]
+python-source = "src"
+python-packages = ["taktiny", "taktinylib"]
+
 [tool.uv]
 cache-keys = [
     { file = "pyproject.toml" },

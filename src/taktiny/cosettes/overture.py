@@ -52,6 +52,7 @@ from taktiny.nn.module import iter_children
 from taktiny.utils.format import parse_size
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 from taktiny.nn.lora import LoRALinear
+from taktinylib import _save_safetensors
 
 
 _MISSING = object()
@@ -673,13 +674,101 @@ class PretrainedModel(nn.Module):
             for name, source, index in cls._expand_stacked_entries(state)
         }
 
+
+    @staticmethod
+    def _save_safetensors_exp(
+        state: tp.Dict,
+        path: PathLike,
+        filename: str,
+        *,
+        max_shard_byte_size: float,
+    ) -> tp.Tuple[str]:
+        filename, extension = os.path.splitext(filename)
+        
+        import math
+        save_arrays = {}
+        paths = []
+        weight_map = {}
+        accm_byte_size = 0
+        num_shards = 1
+        shard_index = 0
+        for k, v in state.items():
+            accm_byte_size += v.nbytes
+
+        if accm_byte_size > max_shard_byte_size:
+            num_shards = math.ceil(accm_byte_size / max_shard_byte_size)
+
+        accm_byte_size = 0
+
+        def _get_format_number(n):
+            n_str = str(n)
+            remain_zeros = 5 - len(n_str)
+            return f"{"0" * remain_zeros}{n_str}"
+        
+        def _get_current_shard_name():
+            if num_shards > 1:
+                curr_index_str = _get_format_number(shard_index)
+                num_shard_str = _get_format_number(num_shards)
+                return f"{filename}-{curr_index_str}-of-{num_shard_str}.{extension}"
+
+            return f"{filename}.{extension}"
+
+        def _serialize(path: PathLike, state_dict: tp.Dict):
+            save_file(state_dict, path)
+            paths.append(path.__str__())
+
+        for k, v in tqdm(state.items()):
+            if 'stacked' in k:
+                num_stacks = v.shape[0]
+                byte_size_avg = v.nbytes / num_stacks
+            
+                for i in range(num_stacks):
+                    array = v.at[i]
+                    p = os.path.join(path, _get_current_shard_name())
+                    if accm_byte_size > max_shard_byte_size:
+                        _serialize(p, save_arrays)
+                        accm_byte_size = 0
+                        shard_index += 1
+                        save_arrays.clear()
+
+                    layer_key = k.replace('stacked', str(i))
+                    weight_map[layer_key] = p.__str__()
+                    save_arrays[layer_key] = array
+                    accm_byte_size += byte_size_avg
+                    
+                continue
+
+            p = os.path.join(path, _get_current_shard_name())
+            if accm_byte_size > max_shard_byte_size:
+                _serialize(p, save_arrays)
+                accm_byte_size = 0
+                shard_index += 1
+                save_arrays.clear()
+
+            weight_map[k] = p.__str__()
+            save_arrays[k] = v
+            accm_byte_size += v.nbytes
+
+        if len(save_arrays) > 0:
+            p = os.path.join(path, _get_current_shard_name())
+            _serialize(p, save_arrays)
+
+        if num_shards > 1:
+            p_index = os.path.join(path, f'{filename}.{extension}.index.json')
+            with open(p_index, 'w') as f:
+                json.dump({
+                    'weight_map': weight_map
+                }, f, indent=2)
+
+        return tuple(paths)
+
     @staticmethod
     def _save_safetensors(
         state: tp.Dict,
         path: PathLike,
         filename: str,
         *,
-        max_shard_size: int,
+        max_shard_size: str,
         always_write_index: bool=False,
     ) -> tp.Any:
         stem, extension = os.path.splitext(filename)

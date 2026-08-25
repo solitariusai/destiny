@@ -236,15 +236,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pyo3-dlpack"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0b63204e7bab5d41b7f0f7ae01095ffacbef4453b40ecf866e914ef74e920ee"
-dependencies = [
- "pyo3",
-]
-
-[[package]]
 name = "pyo3-ffi"
 version = "0.28.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -404,7 +395,6 @@ dependencies = [
  "anyhow",
  "numpy",
  "pyo3",
- "pyo3-dlpack",
  "safetensors",
  "serde",
  "serde_json",
