@@ -27,12 +27,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+import asyncio
 from huggingface_hub import (
     HfApi,
     hf_hub_download,
     split_state_dict_into_shards_factory,
 )
-from safetensors.numpy import save_file
+from huggingface_hub.serialization._base import parse_size_to_int
+from safetensors.flax import save_file
 import numpy as np
 from safetensors import safe_open
 from ..utils.quantization import (
@@ -510,6 +512,7 @@ class PretrainedModel(nn.Module):
         max_shard_size: str='10GB',
         module_map: tp.Any=None,
     ) -> tuple[tp.Any, ...]:
+        max_shard_byte_size = parse_size_to_int(max_shard_size)
         os.makedirs(path, exist_ok=True)
         model_config_path = os.path.join(path, 'config.json')
         with open(model_config_path, 'w') as config_file:
@@ -531,11 +534,13 @@ class PretrainedModel(nn.Module):
             config_path = os.path.join(path, 'adapter_config.json')
             with open(config_path, 'w') as config_file:
                 json.dump(snapshot['peft_config'], config_file, indent=2)
-            adapter_paths = cls._save_safetensors(
-                state,
-                path,
-                'adapter_model.safetensors',
-                max_shard_size=max_shard_size,
+            adapter_paths = asyncio.run(
+                cls._save_safetensors(
+                    state,
+                    path,
+                    'adapter_model.safetensors',
+                    max_shard_byte_size=max_shard_byte_size,
+                )
             )
             return (
                 model_config_path,
@@ -562,12 +567,12 @@ class PretrainedModel(nn.Module):
             quantization_path = None
         else:
             quantization_path = None
-        checkpoint_paths = cls._save_safetensors(
-            state_dict,
-            path,
-            'model.safetensors',
-            max_shard_size=max_shard_size,
-            always_write_index=False,
+        checkpoint_paths = asyncio.run(
+            cls._save_safetensors(
+                state_dict, path,
+                'model.safetensors',
+                max_shard_byte_size=max_shard_byte_size,
+            )
         )
         return (
             model_config_path,
@@ -675,7 +680,7 @@ class PretrainedModel(nn.Module):
 
 
     @staticmethod
-    def _save_safetensors_exp(
+    async def _save_safetensors(
         state: tp.Dict,
         path: PathLike,
         filename: str,
@@ -691,8 +696,14 @@ class PretrainedModel(nn.Module):
         accm_byte_size = 0
         num_shards = 1
         shard_index = 0
+        num_arrays = 0
         for k, v in state.items():
             accm_byte_size += v.nbytes
+            if 'stacked' in k:
+                num_arrays += v.shape[0]
+                continue
+
+            num_arrays += 1
 
         if accm_byte_size > max_shard_byte_size:
             num_shards = math.ceil(accm_byte_size / max_shard_byte_size)
@@ -708,124 +719,76 @@ class PretrainedModel(nn.Module):
             if num_shards > 1:
                 curr_index_str = _get_format_number(shard_index)
                 num_shard_str = _get_format_number(num_shards)
-                return f"{filename}-{curr_index_str}-of-{num_shard_str}.{extension}"
+                return f"{filename}-{curr_index_str}-of-{num_shard_str}{extension}"
 
-            return f"{filename}.{extension}"
+            return f"{filename}{extension}"
 
-        def _serialize(path: PathLike, state_dict: tp.Dict):
-            save_file(state_dict, path)
+        async def _serialize(path: PathLike, state_dict: tp.Dict):
+            asyncio.create_task(
+                asyncio.to_thread(
+                    save_file, 
+                    state_dict, 
+                    path
+                )
+            )
+            # save_file(state_dict, path)
             paths.append(path.__str__())
 
-        for k, v in tqdm(state.items()):
+        progress = tqdm(
+            total=num_arrays,
+            desc='Saving checkpoint',
+            unit='tensor',
+            disable=jax.process_index() != 0,
+        )
+        for k, v in state.items():
             if 'stacked' in k:
                 num_stacks = v.shape[0]
                 byte_size_avg = v.nbytes / num_stacks
             
                 for i in range(num_stacks):
-                    array = v.at[i]
-                    p = os.path.join(path, _get_current_shard_name())
+                    array = v[i]
+                    s = _get_current_shard_name()
+                    p = os.path.join(path, s)
                     if accm_byte_size > max_shard_byte_size:
-                        _serialize(p, save_arrays)
+                        await _serialize(p, save_arrays)
                         accm_byte_size = 0
                         shard_index += 1
                         save_arrays.clear()
 
                     layer_key = k.replace('stacked', str(i))
-                    weight_map[layer_key] = p.__str__()
+                    weight_map[layer_key] = s
                     save_arrays[layer_key] = array
                     accm_byte_size += byte_size_avg
+                    progress.update(1)
                     
                 continue
 
-            p = os.path.join(path, _get_current_shard_name())
+            s = _get_current_shard_name()
+            p = os.path.join(path, s)
             if accm_byte_size > max_shard_byte_size:
-                _serialize(p, save_arrays)
+                await _serialize(p, save_arrays)
                 accm_byte_size = 0
                 shard_index += 1
                 save_arrays.clear()
 
-            weight_map[k] = p.__str__()
+            weight_map[k] = s
             save_arrays[k] = v
             accm_byte_size += v.nbytes
+            progress.update(1)
 
         if len(save_arrays) > 0:
-            p = os.path.join(path, _get_current_shard_name())
-            _serialize(p, save_arrays)
+            s = _get_current_shard_name()
+            p = os.path.join(path, s)
+            await _serialize(p, save_arrays)
 
         if num_shards > 1:
-            p_index = os.path.join(path, f'{filename}.{extension}.index.json')
+            p_index = os.path.join(path, f'{filename}{extension}.index.json')
             with open(p_index, 'w') as f:
                 json.dump({
                     'weight_map': weight_map
                 }, f, indent=2)
 
         return tuple(paths)
-
-    @staticmethod
-    def _save_safetensors(
-        state: tp.Dict,
-        path: PathLike,
-        filename: str,
-        *,
-        max_shard_size: str,
-        always_write_index: bool=False,
-    ) -> tp.Any:
-        stem, extension = os.path.splitext(filename)
-        split = split_state_dict_into_shards_factory(
-            state,
-            get_storage_size=lambda value: int(value.nbytes),
-            filename_pattern=f'{stem}{{suffix}}{extension}',
-            max_shard_size=max_shard_size,
-        )
-
-        shard_pattern = re.compile(
-            rf'{re.escape(stem)}-\d{{5}}-of-\d{{5}}'
-            rf'{re.escape(extension)}'
-        )
-        for existing_filename in os.listdir(path):
-            if (
-                existing_filename == filename
-                or shard_pattern.fullmatch(existing_filename)
-                or existing_filename == f'{filename}.index.json'
-            ):
-                os.remove(os.path.join(path, existing_filename))
-
-        saved_paths = []
-        shard_items = list(split.filename_to_tensors.items())
-
-        def write_shard(item: tp.Any) -> str:
-            shard_filename, tensor_names = item
-            shard_path = os.path.join(path, shard_filename)
-            save_file(
-                {name: state[name] for name in tensor_names},
-                shard_path,
-            )
-            return shard_path
-
-        # Shards are serialized concurrently; the Rust writer releases the
-        # GIL, so large sharded checkpoints overlap disk writes.
-        workers = max(1, min(len(shard_items), 8))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            for shard_path in executor.map(write_shard, shard_items):
-                saved_paths.append(shard_path)
-
-        if split.is_sharded or always_write_index:
-            index_path = os.path.join(
-                path,
-                f'{filename}.index.json',
-            )
-            with open(index_path, 'w') as index_file:
-                json.dump(
-                    {
-                        'metadata': split.metadata,
-                        'weight_map': split.tensor_to_filename,
-                    },
-                    index_file,
-                    indent=2,
-                )
-            saved_paths.append(index_path)
-
-        return tuple(saved_paths)
 
     @staticmethod
     def _resident_nbytes(value: tp.Any) -> int:
@@ -1228,19 +1191,17 @@ class PretrainedModel(nn.Module):
             configuration files first, followed by weight files and their
             index when present.
         """
-        if self._lora_state_dict():
-            # Adapters are tiny; the eager snapshot path is fine for them.
-            return self._save_pretrained_snapshot(
-                self._checkpoint_snapshot(),
-                path,
-                max_shard_size=max_shard_size,
-                module_map=module_map,
-            )
-        return self._stream_save_pretrained(
+        return self._save_pretrained_snapshot(
+            self._checkpoint_snapshot(),
             path,
             max_shard_size=max_shard_size,
             module_map=module_map,
         )
+        # return self._stream_save_pretrained(
+        #     path,
+        #     max_shard_size=max_shard_size,
+        #     module_map=module_map,
+        # )
 
     def load_pretrained(self, path: str) -> tp.Any:
         """Load a Taktiny-native full checkpoint into this model in place.
