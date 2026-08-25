@@ -48,6 +48,7 @@ from ..utils.quantization import merge_quantization
 from ..utils.weights import map_state_dict
 from ..utils.logging import is_jax_rank_zero, tqdm
 from ..utils.sharding import create_sharding
+from ..utils.sync import run_sync
 
 from taktiny import nn
 from taktiny.nn.module import iter_children
@@ -512,7 +513,7 @@ class PretrainedModel(nn.Module):
         max_shard_size: str='10GB',
         module_map: tp.Any=None,
     ) -> tuple[tp.Any, ...]:
-        max_shard_byte_size = parse_size_to_int(max_shard_size)
+        max_shard_byte_size = max_shard_size if isinstance(max_shard_size, int) else parse_size_to_int(max_shard_size)
         os.makedirs(path, exist_ok=True)
         model_config_path = os.path.join(path, 'config.json')
         with open(model_config_path, 'w') as config_file:
@@ -534,7 +535,8 @@ class PretrainedModel(nn.Module):
             config_path = os.path.join(path, 'adapter_config.json')
             with open(config_path, 'w') as config_file:
                 json.dump(snapshot['peft_config'], config_file, indent=2)
-            adapter_paths = asyncio.run(
+                
+            adapter_paths = run_sync(
                 cls._save_safetensors(
                     state,
                     path,
@@ -567,7 +569,7 @@ class PretrainedModel(nn.Module):
             quantization_path = None
         else:
             quantization_path = None
-        checkpoint_paths = asyncio.run(
+        checkpoint_paths = run_sync(
             cls._save_safetensors(
                 state_dict, path,
                 'model.safetensors',
@@ -717,7 +719,7 @@ class PretrainedModel(nn.Module):
         
         def _get_current_shard_name():
             if num_shards > 1:
-                curr_index_str = _get_format_number(shard_index)
+                curr_index_str = _get_format_number(shard_index + 1)
                 num_shard_str = _get_format_number(num_shards)
                 return f"{filename}-{curr_index_str}-of-{num_shard_str}{extension}"
 
@@ -737,7 +739,7 @@ class PretrainedModel(nn.Module):
         progress = tqdm(
             total=num_arrays,
             desc='Saving checkpoint',
-            unit='tensor',
+            # unit='tensor',
             disable=jax.process_index() != 0,
         )
         for k, v in state.items():
