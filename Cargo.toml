@@ -17,4 +17,4 @@ stubgen = ["pyo3/experimental-inspect"]
 [lib]
 name = "taktinylib"
 crate-type = ["cdylib"]
-path = "src/taktinylib/lib.rs"
+path = "lib/lib.rs"

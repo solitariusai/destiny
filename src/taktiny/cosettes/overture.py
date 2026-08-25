@@ -52,7 +52,6 @@ from taktiny.nn.module import iter_children
 from taktiny.utils.format import parse_size
 from taktiny.utils.typing import AxisNames, DType, PathLike, LogicalRules
 from taktiny.nn.lora import LoRALinear
-from taktinylib import _save_safetensors
 
 
 _MISSING = object()

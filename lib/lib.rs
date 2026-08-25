@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 
 
 #[pymodule]
+#[pyo3(name = "_taktinylib")]
 mod taktinylib {
     use pyo3::{exceptions::PyRuntimeError, prelude::*, types::PyDict};
     use std::path::PathBuf;

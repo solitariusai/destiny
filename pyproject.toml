@@ -1,7 +1,7 @@
 [project]
 name = "taktiny"
 version = "0.0.1"
-description = "Add your description here"
+description = "A Deep Learning framework built on JAX"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -39,6 +39,7 @@ dev = [
     "flax>=0.12.7",
     "optax>=0.2.8",
     "pytest>=9.1.1",
+    "taktiny",
     "tiktoken>=0.13.0",
     "torchvision>=0.27.1",
 ]
@@ -51,6 +52,7 @@ markers = [
 
 [tool.maturin]
 python-source = "src"
+module-name = "taktinylib._taktinylib"
 python-packages = ["taktiny", "taktinylib"]
 
 [tool.uv]
@@ -60,3 +62,6 @@ cache-keys = [
     { file = "Cargo.lock" },
     { file = "src/**/*.rs" },
 ]
+
+[tool.uv.sources]
+taktiny = { workspace = true }
