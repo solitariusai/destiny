@@ -15,7 +15,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 import taktiny
 from taktiny import nn
 from taktiny import Takt
-from taktiny.cosettes.overture import PretrainedModel
+from taktiny.maestro.overture import PretrainedModel
 from taktiny.peft import LoraConfig
 from taktiny.trainer import (
     DatasetConfig,

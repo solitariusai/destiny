@@ -25,7 +25,7 @@ from functools import partial
 
 from taktiny import nn
 from taktiny.cosettes.continuo import _approximate_gelu
-from taktiny.cosettes.overture import ModelOutput, PretrainedModel
+from taktiny.maestro.overture import ModelOutput, PretrainedModel
 from taktiny.maestro.config import ModelConfig
 from taktiny.utils.typing import (
     ArrayLike,
@@ -590,8 +590,8 @@ class DiffusionTransformerModel(PretrainedModel):
     Component types follow role-specific constructor contracts. Initialized
     module instances may be supplied when an architecture requires a different
     constructor. Subclasses can override the preparation and finalization
-    hooks without reimplementing layer iteration. ``use_list=False`` stores
-    layers in an ``nn.SeqStack``. Depth-dependent topologies are partitioned
+    hooks without reimplementing layer iteration. ``stack_type='stack'``
+    stores layers in an ``nn.SeqStack``. Depth-dependent topologies are partitioned
     into maximal contiguous stack-compatible groups while preserving one
     carry and the original execution order.
     """
@@ -632,7 +632,6 @@ class DiffusionTransformerModel(PretrainedModel):
         component_kwargs: Mapping[str, Mapping[str, tp.Any]] | None = None,
         mesh: jax.sharding.Mesh | None = None,
         sharding_rules: LogicalRules | None = None,
-        use_list: bool = True,
         stack_type: tp.Literal['list', 'stack'] | None = None,
     ) -> None:
         if (
@@ -640,12 +639,9 @@ class DiffusionTransformerModel(PretrainedModel):
             or not issubclass(transformer_layer, nn.Module)
         ):
             raise TypeError('transformer_layer must be an nn.Module subclass')
-        if not isinstance(use_list, bool):
-            raise TypeError('use_list must be a boolean')
-        if stack_type is not None:
-            if stack_type not in {'list', 'stack'}:
-                raise ValueError("stack_type must be 'list' or 'stack'")
-            use_list = stack_type == 'list'
+        stack_type = stack_type or 'stack'
+        if stack_type not in {'list', 'stack'}:
+            raise ValueError("stack_type must be 'list' or 'stack'")
 
         self.config = config
         self.num_layers = _positive_int(
@@ -752,15 +748,14 @@ class DiffusionTransformerModel(PretrainedModel):
             transformer_layer(config, rngs=rngs, layer_idx=index)
             for index in range(self.num_layers)
         ]
-        self.requested_use_list = use_list
-        if use_list:
+        self.stack_type = stack_type
+        if stack_type == 'list':
             self.layers = nn.List(layers)
         else:
             for layer in layers:
                 if hasattr(layer, 'layer_idx'):
                     layer.layer_idx = None
             self.layers = nn.SeqStack(layers)
-        self.use_list = isinstance(self.layers, nn.List)
 
         if output_norm is None:
             self.output_norm = None
@@ -945,10 +940,10 @@ class DiffusionTransformerModel(PretrainedModel):
         if self.remat:
             call_layer = jax.checkpoint(
                 call_layer,
-                prevent_cse=self.use_list,
+                prevent_cse=self.stack_type == 'list',
             )
 
-        if not self.use_list:
+        if self.stack_type == 'stack':
             control_stack = None
             if controls:
                 for control in controls:

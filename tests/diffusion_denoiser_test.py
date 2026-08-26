@@ -52,10 +52,10 @@ class _Transformer(_LoadableComponent):
         config: ModelConfig,
         *,
         marker: str = '',
-        use_list: bool = True,
+        stack_type: str = 'stack',
     ) -> None:
         super().__init__(config, marker=marker)
-        self.use_list = use_list
+        self.stack_type = stack_type
 
 
 class _Autoencoder(_LoadableComponent):
@@ -101,7 +101,7 @@ def test_diffusion_denoiser_loads_each_component_from_its_subfolder(tmp_path):
     assert _Autoencoder.calls[0]['marker'] == 'vae-only'
 
 
-def test_diffusion_denoiser_routes_use_list_only_to_compatible_components(
+def test_diffusion_denoiser_routes_stack_type_only_to_compatible_components(
     tmp_path,
 ):
     _Transformer.calls.clear()
@@ -112,11 +112,11 @@ def test_diffusion_denoiser_routes_use_list_only_to_compatible_components(
     _ArrayDenoiser.from_pretrained(
         tmp_path,
         local=True,
-        use_list=False,
+        stack_type='stack',
     )
 
-    assert _Transformer.calls[0]['kwargs']['use_list'] is False
-    assert 'use_list' not in _Autoencoder.calls[0]['kwargs']
+    assert _Transformer.calls[0]['kwargs']['stack_type'] == 'stack'
+    assert 'stack_type' not in _Autoencoder.calls[0]['kwargs']
 
 
 def test_diffusion_denoiser_accepts_preloaded_components(tmp_path):

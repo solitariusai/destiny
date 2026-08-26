@@ -10,8 +10,8 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 from taktiny import Takt, nn
-from taktiny.cosettes import overture as pretrained_base
-from taktiny.cosettes.overture import PretrainedModel
+from taktiny.maestro import overture as pretrained_base
+from taktiny.maestro.overture import PretrainedModel
 from taktiny.maestro.config import ModelConfig
 from taktiny.peft import LoraConfig
 
@@ -339,8 +339,6 @@ def test_save_pretrained_round_trips_qwix_model(tmp_path):
     )
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_save_pretrained_round_trips_stacked_qwix_model(tmp_path):
     source = TinyStackedPretrainedModel()
     source.layers.stacked.proj.weight.value = qwix.quantize(
@@ -367,8 +365,6 @@ def test_save_pretrained_round_trips_stacked_qwix_model(tmp_path):
     )
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_streamed_save_writes_shards_and_index(tmp_path):
     """Small max_shard_size forces the streaming writer to emit several
     shards; the index must cover every expanded tensor and the checkpoint
@@ -398,8 +394,6 @@ def test_streamed_save_writes_shards_and_index(tmp_path):
     )
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_streamed_save_prefetch_toggle_is_byte_identical(
     tmp_path,
     monkeypatch,
@@ -1028,8 +1022,6 @@ def test_save_pretrained_expands_full_seqstack_state(tmp_path):
     assert not (tmp_path / 'model.safetensors.index.json').exists()
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_save_pretrained_shards_full_model_at_size_limit(tmp_path):
     model = TinyStackedPretrainedModel()
 
@@ -1060,8 +1052,6 @@ def test_save_pretrained_shards_full_model_at_size_limit(tmp_path):
     )
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_save_pretrained_shards_lora_adapter_at_size_limit(tmp_path):
     model = Takt.apply_peft(
         TinyStackedPretrainedModel(),
@@ -1099,8 +1089,6 @@ def test_save_pretrained_shards_lora_adapter_at_size_limit(tmp_path):
     }
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_save_pretrained_replaces_stale_shards(tmp_path):
     model = TinyStackedPretrainedModel()
     model.save_pretrained(tmp_path, max_shard_size=48)
@@ -1148,8 +1136,6 @@ def test_save_writes_current_transformers_config_after_dtype_override(
     assert saved_config['torch_dtype'] == 'float16'
 
 
-import pytest
-@pytest.mark.skip(reason='int issue')
 def test_push_to_hub_uploads_sharded_model(monkeypatch):
     FakeHfApi.calls = {}
     monkeypatch.setattr(pretrained_base, 'HfApi', FakeHfApi)

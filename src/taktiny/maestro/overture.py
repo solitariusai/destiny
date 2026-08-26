@@ -14,14 +14,14 @@
 from __future__ import annotations
 import typing as tp
 import time
+import math
 from collections.abc import Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
 import os
 import json
-import re
 import tempfile
 import copy
 import collections
+import re
 from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
@@ -58,6 +58,12 @@ from taktiny.nn.lora import LoRALinear
 
 
 _MISSING = object()
+
+
+class _CheckpointSource(tp.NamedTuple):
+    files: dict[str, list[str] | None]
+    paths: dict[str, str]
+    native_qwix_directory: str | None
 
 @jax.tree_util.register_pytree_node_class
 class ModelOutput(Mapping[str, tp.Any]):
@@ -526,6 +532,7 @@ class PretrainedModel(nn.Module):
 
         if module_map is None:
             module_map = snapshot.get('module_map')
+
         state = cls._invert_checkpoint_names(
             snapshot['state'],
             module_map,
@@ -689,107 +696,79 @@ class PretrainedModel(nn.Module):
         *,
         max_shard_byte_size: float,
     ) -> tp.Tuple[str]:
-        filename, extension = os.path.splitext(filename)
-        
-        import math
-        save_arrays = {}
-        paths = []
-        weight_map = {}
-        accm_byte_size = 0
-        num_shards = 1
-        shard_index = 0
-        num_arrays = 0
-        for k, v in state.items():
-            accm_byte_size += v.nbytes
-            if 'stacked' in k:
-                num_arrays += v.shape[0]
-                continue
-
-            num_arrays += 1
-
-        if accm_byte_size > max_shard_byte_size:
-            num_shards = math.ceil(accm_byte_size / max_shard_byte_size)
-
-        accm_byte_size = 0
-
-        def _get_format_number(n):
-            n_str = str(n)
-            remain_zeros = 5 - len(n_str)
-            return f"{"0" * remain_zeros}{n_str}"
-        
-        def _get_current_shard_name():
-            if num_shards > 1:
-                curr_index_str = _get_format_number(shard_index + 1)
-                num_shard_str = _get_format_number(num_shards)
-                return f"{filename}-{curr_index_str}-of-{num_shard_str}{extension}"
-
-            return f"{filename}{extension}"
-
-        async def _serialize(path: PathLike, state_dict: tp.Dict):
-            asyncio.create_task(
-                asyncio.to_thread(
-                    save_file, 
-                    state_dict, 
-                    path
-                )
-            )
-            # save_file(state_dict, path)
-            paths.append(path.__str__())
-
+        stem, extension = os.path.splitext(filename)
+        split = split_state_dict_into_shards_factory(
+            state,
+            get_storage_size=lambda value: int(value.nbytes),
+            filename_pattern=f'{stem}{{suffix}}{extension}',
+            max_shard_size=int(max_shard_byte_size),
+        )
         progress = tqdm(
-            total=num_arrays,
+            total=len(state),
             desc='Saving checkpoint',
-            # unit='tensor',
             disable=jax.process_index() != 0,
         )
-        for k, v in state.items():
-            if 'stacked' in k:
-                num_stacks = v.shape[0]
-                byte_size_avg = v.nbytes / num_stacks
-            
-                for i in range(num_stacks):
-                    array = v[i]
-                    s = _get_current_shard_name()
-                    p = os.path.join(path, s)
-                    if accm_byte_size > max_shard_byte_size:
-                        await _serialize(p, save_arrays)
-                        accm_byte_size = 0
-                        shard_index += 1
-                        save_arrays.clear()
+        paths = []
+        tasks = []
 
-                    layer_key = k.replace('stacked', str(i))
-                    weight_map[layer_key] = s
-                    save_arrays[layer_key] = array
-                    accm_byte_size += byte_size_avg
-                    progress.update(1)
-                    
-                continue
+        async def save_shard(
+            shard: dict[str, tp.Any],
+            shard_path: str,
+        ) -> None:
+            await asyncio.to_thread(save_file, shard, shard_path)
+            progress.update(len(shard))
 
-            s = _get_current_shard_name()
-            p = os.path.join(path, s)
-            if accm_byte_size > max_shard_byte_size:
-                await _serialize(p, save_arrays)
-                accm_byte_size = 0
-                shard_index += 1
-                save_arrays.clear()
+        for shard_name, tensor_names in split.filename_to_tensors.items():
+            shard_path = os.path.join(path, shard_name)
+            shard = {name: state[name] for name in tensor_names}
+            tasks.append(
+                asyncio.create_task(save_shard(shard, shard_path))
+            )
+            paths.append(str(shard_path))
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            progress.close()
 
-            weight_map[k] = s
-            save_arrays[k] = v
-            accm_byte_size += v.nbytes
-            progress.update(1)
+        index_name = f'{stem}{extension}.index.json'
+        if split.is_sharded:
+            index_path = os.path.join(path, index_name)
+            metadata = {
+                **split.metadata,
+                'total_parameters': sum(
+                    math.prod(value.shape) for value in state.values()
+                ),
+            }
+            with open(index_path, 'w') as index_file:
+                json.dump(
+                    {
+                        'metadata': metadata,
+                        'weight_map': split.tensor_to_filename,
+                    },
+                    index_file,
+                    indent=2,
+                )
+            paths.append(index_path)
 
-        if len(save_arrays) > 0:
-            s = _get_current_shard_name()
-            p = os.path.join(path, s)
-            await _serialize(p, save_arrays)
-
-        if num_shards > 1:
-            p_index = os.path.join(path, f'{filename}{extension}.index.json')
-            with open(p_index, 'w') as f:
-                json.dump({
-                    'weight_map': weight_map
-                }, f, indent=2)
-
+        # Remove artifacts from an older save only after the replacement
+        # checkpoint is complete. Otherwise a sharded-to-single transition
+        # leaves a stale index that takes precedence during loading.
+        active_names = {os.path.basename(saved_path) for saved_path in paths}
+        shard_pattern = re.compile(
+            rf'{re.escape(stem)}-\d{{5}}-of-\d{{5}}'
+            rf'{re.escape(extension)}'
+        )
+        for existing_name in os.listdir(path):
+            is_checkpoint_artifact = (
+                existing_name == filename
+                or existing_name == index_name
+                or shard_pattern.fullmatch(existing_name) is not None
+            )
+            if (
+                is_checkpoint_artifact
+                and existing_name not in active_names
+            ):
+                os.remove(os.path.join(path, existing_name))
         return tuple(paths)
 
     @staticmethod
@@ -824,342 +803,6 @@ class PretrainedModel(nn.Module):
                 total += value.zero_point.size * itemsize
             return int(total)
         return int(value.nbytes)
-
-    def _stream_save_pretrained(
-        self,
-        path: str,
-        *,
-        max_shard_size: str='10GB',
-        module_map: tp.Any=None,
-    ) -> tuple[tp.Any, ...]:
-        """Write a full checkpoint shard-by-shard without a full host copy.
-
-        Device tensors are fetched one shard at a time, and stacked
-        parameters transfer only the contiguous layer ranges each shard
-        uses, so peak host memory stays at a couple of shards instead of
-        the whole model; the fetch of one shard overlaps with the disk
-        write of the previous one.
-        """
-        from taktiny.utils.logging import is_jax_rank_zero
-
-        started = time.perf_counter()
-        os.makedirs(path, exist_ok=True)
-        config_path = os.path.join(path, 'config.json')
-        with open(config_path, 'w') as config_file:
-            json.dump(
-                self._checkpoint_config(),
-                config_file,
-                indent=2,
-                default=str,
-            )
-
-        if module_map is None:
-            module_map = list(
-                getattr(self, 'checkpoint_module_map', None) or []
-            )
-
-        flat = self.flat_state_dict()
-        entries = self._expand_stacked_entries(flat)
-        expanded = {
-            name: (
-                flat[source]
-                if index is None
-                else flat[source][index]
-            )
-            for name, source, index in entries
-        }
-        provenance = {
-            name: (source, index) for name, source, index in entries
-        }
-        # Restore source-format names before planning shards so the written
-        # index matches what `_save_pretrained_snapshot` produces. The
-        # inversion preserves key order, so display and internal names stay
-        # aligned positionally.
-        internal_names = list(expanded.keys())
-        renamed = self._invert_checkpoint_names(expanded, module_map)
-        internal_of_display = dict(zip(renamed.keys(), internal_names))
-
-        split = split_state_dict_into_shards_factory(
-            renamed,
-            get_storage_size=self._storage_nbytes,
-            filename_pattern='model{suffix}.safetensors',
-            max_shard_size=max_shard_size,
-        )
-
-        stem = 'model'
-        extension = '.safetensors'
-        shard_pattern = re.compile(
-            rf'{re.escape(stem)}-\d{{5}}-of-\d{{5}}'
-            rf'{re.escape(extension)}'
-        )
-        for existing_filename in os.listdir(path):
-            if (
-                existing_filename == f'{stem}{extension}'
-                or shard_pattern.fullmatch(existing_filename)
-                or existing_filename == f'{stem}{extension}.index.json'
-                or existing_filename == 'quantization_config.json'
-            ):
-                os.remove(os.path.join(path, existing_filename))
-
-        shard_items = list(split.filename_to_tensors.items())
-        # Cache keys are (source, layer_index) pairs, or (source, None) for
-        # parameters outside a SeqStack; eviction is keyed the same way so a
-        # stacked tensor only stays resident while some layer of it is still
-        # needed by a future shard.
-        last_use = {}
-        for shard_index, (_, tensor_names) in enumerate(shard_items):
-            for name in tensor_names:
-                key = provenance[internal_of_display[name]]
-                last_use[key] = shard_index
-
-        total_bytes = sum(self._storage_nbytes(v) for v in renamed.values())
-        saved_paths = [config_path]
-        quantization_parameters: dict = {}
-        host_cache: dict = {}
-        write_start = time.perf_counter()
-
-        # Writes go straight to the Rust safetensors writer one shard at a
-        # time. Optional JAX-native prefetch issues shard N+1's device
-        # copies before shard N is written, overlapping DMA with disk I/O;
-        # enable with TAKTINY_SAVE_PREFETCH=1 after verifying it wins on the
-        # target accelerator, since CPU backends measure slower with it.
-        use_prefetch = (
-            len(shard_items) > 1
-            and os.environ.get('TAKTINY_SAVE_PREFETCH', '0') == '1'
-            and hasattr(jax.Array, 'copy_to_host_async')
-        )
-        if is_jax_rank_zero() and len(shard_items) > 1:
-            print(
-                f'[taktiny] planning save: {len(shard_items)} shards, '
-                f'~{total_bytes / 1e9:.2f} GB '
-                f'(prefetch {"on" if use_prefetch else "off"})'
-            )
-
-        def stabilize(values: tp.Any) -> tp.Any:
-            def copy_leaf(value: tp.Any) -> tp.Any:
-                # Per-layer slices of stacked tensors are contiguous views
-                # that pin their base buffer, so safetensors can read them
-                # in place; copying every view would duplicate the whole
-                # shard on host. Only materialize non-contiguous arrays.
-                if (
-                    isinstance(value, np.ndarray)
-                    and not value.flags['C_CONTIGUOUS']
-                ):
-                    return np.ascontiguousarray(value)
-                return value
-
-            return jax.tree.map(copy_leaf, values)
-
-        def begin_shard(shard_index: int, tensor_names: list) -> dict:
-            """Resolve exact device runs and optionally start their D2H."""
-            requested_bytes = sum(
-                self._storage_nbytes(expanded[internal_of_display[name]])
-                for name in tensor_names
-            )
-            needs: dict = {}
-            for name in tensor_names:
-                key = provenance[internal_of_display[name]]
-                needs.setdefault(key[0], set()).add(key[1])
-
-            # Fetch only the layer ranges this shard actually uses: a
-            # stacked tensor is transferred as contiguous [lo:hi] device
-            # slices so shard size bounds host residency even when a stack
-            # spans several shards.
-            to_fetch: dict = {}
-            fetched_bytes = 0
-            for source, indices in needs.items():
-                if None in indices:
-                    if (source, None) not in host_cache:
-                        to_fetch[(source, None)] = flat[source]
-                        fetched_bytes += self._resident_nbytes(flat[source])
-                    continue
-                run_start = None
-                previous = None
-                for index in sorted(indices):
-                    if (source, index) in host_cache:
-                        continue
-                    if previous is None or index != previous + 1:
-                        if previous is not None:
-                            to_fetch[(
-                                source,
-                                run_start,
-                                previous,
-                            )] = flat[source][run_start:previous + 1]
-                            fetched_bytes += self._resident_nbytes(
-                                flat[source][run_start:previous + 1]
-                            )
-                        run_start = index
-                    previous = index
-                if previous is not None:
-                    to_fetch[(source, run_start, previous)] = flat[source][
-                        run_start:previous + 1
-                    ]
-                    fetched_bytes += self._resident_nbytes(
-                        flat[source][run_start:previous + 1]
-                    )
-
-            prefetched = False
-            if use_prefetch and to_fetch:
-                try:
-                    for block in to_fetch.values():
-                        block.copy_to_host_async()
-                    prefetched = True
-                except Exception:
-                    prefetched = False
-            return {
-                'index': shard_index,
-                'to_fetch': to_fetch,
-                'requested_bytes': requested_bytes,
-                'fetched_bytes': fetched_bytes,
-                'prefetched': prefetched,
-            }
-
-        def materialize_shard(handle: dict) -> None:
-            shard_index = handle['index']
-            to_fetch = handle['to_fetch']
-            handle['d2h_seconds'] = 0.0
-            handle['sync_seconds'] = 0.0
-            if to_fetch:
-                blocks = list(to_fetch.values())
-                # Charge pending device work to 'sync', not to the transfer,
-                # so the D2H figure reflects transfer throughput alone.
-                sync_start = time.perf_counter()
-                jax.block_until_ready(blocks)
-                handle['sync_seconds'] = time.perf_counter() - sync_start
-
-                transfer_start = time.perf_counter()
-                fetched = jax.device_get(to_fetch)
-                handle['d2h_seconds'] = (
-                    time.perf_counter() - transfer_start
-                )
-                for key, block in fetched.items():
-                    if len(key) == 2:
-                        host_cache[key] = block
-                    else:
-                        _, lo, hi = key
-                        for offset in range(hi - lo + 1):
-                            host_cache[(key[0], lo + offset)] = block[offset]
-
-            if to_fetch and is_jax_rank_zero() and (
-                len(shard_items) > 1 or handle['d2h_seconds'] >= 0.5
-            ):
-                run_sizes = sorted(
-                    self._resident_nbytes(block) for block in to_fetch.values()
-                )
-                cache_bytes = sum(
-                    self._resident_nbytes(value)
-                    for value in host_cache.values()
-                )
-                print(
-                    f'[taktiny] shard {shard_index + 1}/'
-                    f'{len(shard_items)}: D2H {handle["d2h_seconds"]:.1f}s '
-                    f'(+sync {handle["sync_seconds"]:.1f}s) | '
-                    f'{len(run_sizes)} runs, largest '
-                    f'{run_sizes[-1] / 1e6:.0f}MB, median '
-                    f'{run_sizes[len(run_sizes) // 2] / 1e6:.0f}MB | '
-                    f'fetched {handle["fetched_bytes"] / 1e6:.0f}MB of '
-                    f'{handle["requested_bytes"] / 1e6:.0f}MB requested | '
-                    f'host cache {cache_bytes / 1e6:.0f}MB'
-                )
-
-        def build_shard(shard_filename: str, tensor_names: list) -> dict:
-            # Build under internal spellings; the single inversion below
-            # restores source-format names exactly like the eager path.
-            shard_state = {}
-            for name in tensor_names:
-                internal = internal_of_display[name]
-                source, index = provenance[internal]
-                shard_state[internal] = host_cache[(source, index)]
-            stabilized = stabilize(shard_state)
-            inverted = self._invert_checkpoint_names(stabilized, module_map)
-            encoded, metadata = self._encode_qwix_state(inverted)
-            if metadata is not None:
-                quantization_parameters.update(metadata['parameters'])
-            return encoded
-
-        pending = None
-        for shard_index, (shard_filename, tensor_names) in enumerate(
-            shard_items,
-        ):
-            current = (
-                pending
-                if pending is not None
-                else begin_shard(shard_index, tensor_names)
-            )
-            materialize_shard(current)
-            encoded = build_shard(shard_filename, tensor_names)
-
-            # Kick off shard N+1's DMA before handing shard N to the Rust
-            # writer so the transfer overlaps serialization and disk I/O.
-            if shard_index + 1 < len(shard_items):
-                pending = begin_shard(
-                    shard_index + 1,
-                    shard_items[shard_index + 1][1],
-                )
-            else:
-                pending = None
-
-            shard_path = os.path.join(path, shard_filename)
-            write_shard_start = time.perf_counter()
-            save_file(encoded, shard_path)
-            del encoded
-            if is_jax_rank_zero() and len(shard_items) > 1:
-                print(
-                    f'[taktiny] wrote {shard_filename} in '
-                    f'{time.perf_counter() - write_shard_start:.1f}s'
-                )
-            saved_paths.append(shard_path)
-
-            # Release host cache entries no future shard references. The
-            # write above consumed this shard's views, and views held by an
-            # in-flight prefetch pin their own base buffers, so dropping
-            # stale entries here bounds residency at roughly two shards.
-            host_cache = {
-                key: value
-                for key, value in host_cache.items()
-                if last_use.get(key, -1) > shard_index
-            }
-
-        if quantization_parameters:
-            with open(
-                os.path.join(path, 'quantization_config.json'),
-                'w',
-            ) as quantization_file:
-                json.dump(
-                    {
-                        'format': 'taktiny-qwix',
-                        'version': 1,
-                        'parameters': quantization_parameters,
-                    },
-                    quantization_file,
-                    indent=2,
-                )
-            saved_paths.insert(1, os.path.join(path, 'quantization_config.json'))
-
-        if split.is_sharded:
-            index_path = os.path.join(
-                path,
-                f'{stem}{extension}.index.json',
-            )
-            with open(index_path, 'w') as index_file:
-                json.dump(
-                    {
-                        'metadata': split.metadata,
-                        'weight_map': split.tensor_to_filename,
-                    },
-                    index_file,
-                    indent=2,
-                )
-            saved_paths.append(index_path)
-
-        if is_jax_rank_zero():
-            print(
-                f'[taktiny] checkpoint written to {path}: '
-                f'{total_bytes / 1e9:.2f} GB in '
-                f'{time.perf_counter() - write_start:.1f}s '
-                f'(total {time.perf_counter() - started:.1f}s)'
-            )
-        return tuple(saved_paths)
 
     def save_pretrained(
         self,
@@ -1199,11 +842,6 @@ class PretrainedModel(nn.Module):
             max_shard_size=max_shard_size,
             module_map=module_map,
         )
-        # return self._stream_save_pretrained(
-        #     path,
-        #     max_shard_size=max_shard_size,
-        #     module_map=module_map,
-        # )
 
     def load_pretrained(self, path: str) -> tp.Any:
         """Load a Taktiny-native full checkpoint into this model in place.
@@ -1646,46 +1284,17 @@ class PretrainedModel(nn.Module):
         return str(commit_url)
 
     @classmethod
-    def from_pretrained(
+    def _prepare_pretrained_config(
         cls,
-        path_or_repo: PathLike,
         config: tp.Any,
         *,
-        module_map: tp.List | None = None,
-        local: bool = False,
-        dtype: DType | None = None,
-        quant: tp.Any = None,
-        subfolder: PathLike | str | None = None,
-        weights_filename: str = 'model.safetensors',
-        mesh: jax.sharding.Mesh | None = None,
-        sharding_rules: LogicalRules | None = None,
-        allow_unmatched: bool = False,
-        show_progress: bool = True,
-        load_chunk_size: int | str | None = '1GB',
-        **kwargs,
-    ) -> tp.Any:
-        """
-        Loads Safetensors weights into a newly instantiated model. Supports
-        both single-file and sharded checkpoints, including architecture-
-        specific filenames selected through ``weights_filename``.
+        dtype: DType | None,
+        quant: tp.Any,
+    ) -> tuple[dict[str, tp.Any], str | None]:
+        """Apply runtime dtype/quantization overrides to a model config."""
+        original = copy.deepcopy(cls._config_as_dict(config))
 
-        Args:
-            load_chunk_size: Peak host memory budget used while streaming
-                checkpoint tensors, expressed as an integer byte count or a
-                string such as ``"256MB"``. Tensors are decoded, name-mapped,
-                and transferred in batches up to this size instead of one at
-                a time, trading additional host memory for faster
-                materialization. Defaults to ``"1GB"``; pass ``None`` or
-                ``0`` to load one tensor at a time instead.
-        """
-        # Keep a pristine copy of the caller's configuration so that
-        # ``save_pretrained`` can write back what the model was loaded with
-        # instead of this session's library overrides.
-        original_config_dict = copy.deepcopy(
-            cls._config_as_dict(config)
-        )
-
-        def set_config_override(name: str, value: tp.Any) -> None:
+        def set_override(name: str, value: tp.Any) -> None:
             setattr(config, name, value)
             text_config = vars(config).get('text_config')
             if text_config is not None:
@@ -1709,128 +1318,174 @@ class PretrainedModel(nn.Module):
                     )
                 ):
                     compute_dtype = 'bfloat16'
-
                 uniform_quant = dtype_name
-                set_config_override('dtype', compute_dtype)
-                set_config_override('torch_dtype', compute_dtype)
+                set_override('dtype', compute_dtype)
+                set_override('torch_dtype', compute_dtype)
             else:
-                set_config_override('dtype', dtype)
-                set_config_override('torch_dtype', dtype)
+                set_override('dtype', dtype)
+                set_override('torch_dtype', dtype)
                 plain_dtype_override = (
                     dtype
                     if isinstance(dtype, str)
                     else getattr(dtype, 'name', str(dtype))
                 )
-        if quant is not None and uniform_quant is not None:
-            set_config_override(
-                'quant',
-                merge_quantization(quant, uniform_quant),
-            )
-        elif quant is not None:
-            set_config_override('quant', quant)
-        elif uniform_quant is not None:
-            set_config_override('quant', uniform_quant)
 
+        if quant is not None and uniform_quant is not None:
+            quant = merge_quantization(quant, uniform_quant)
+        elif quant is None:
+            quant = uniform_quant
+        if quant is not None:
+            set_override('quant', quant)
+
+        return original, plain_dtype_override
+
+    @classmethod
+    def _resolve_checkpoint_source(
+        cls,
+        path_or_repo: PathLike,
+        *,
+        local: bool,
+        subfolder: PathLike | str | None,
+        weights_filename: str,
+    ) -> _CheckpointSource:
+        """Resolve checkpoint shards and optional native Qwix metadata."""
+        del cls
         if not isinstance(weights_filename, str) or not weights_filename:
             raise ValueError('weights_filename must be a non-empty string')
         if not weights_filename.endswith('.safetensors'):
             raise ValueError('weights_filename must end with .safetensors')
+
+        root = str(path_or_repo)
+        subfolder_name = os.fspath(subfolder) if subfolder else ''
         index_filename = f'{weights_filename}.index.json'
-        load_chunk_bytes = (
-            parse_size(load_chunk_size)
-            if load_chunk_size is not None
-            else 0
-        )
-
-        if sharding_rules is None:
-            sharding_rules = cls._resolve_sharding_rules()
-
-        path_or_repo_str = str(path_or_repo)
-        module_map = module_map or []
+        index_path = os.path.join(root, subfolder_name, index_filename)
         native_qwix_directory = None
+        is_sharded = local and os.path.isfile(index_path)
+
         if local:
-            candidate = os.path.join(
-                path_or_repo_str,
-                subfolder if subfolder else '',
+            quantization_path = os.path.join(
+                root,
+                subfolder_name,
                 'quantization_config.json',
             )
-            if os.path.isfile(candidate):
-                native_qwix_directory = os.path.dirname(candidate)
-
-        # 1. Determine if model is sharded or single file
-        is_sharded = False
-        if local:
-            index_path = os.path.join(
-                path_or_repo_str,
-                subfolder if subfolder else '',
-                index_filename,
-            )
-            if os.path.exists(index_path):
-                is_sharded = True
+            if os.path.isfile(quantization_path):
+                native_qwix_directory = os.path.dirname(quantization_path)
         else:
             try:
-                info = repo_info(repo_id=path_or_repo_str)
-                files = [f.rfilename for f in info.siblings]
+                repository = repo_info(repo_id=root)
+                filenames = {file.rfilename for file in repository.siblings}
                 target_index = (
-                    f'{subfolder}/{index_filename}'
-                    if subfolder
+                    f'{subfolder_name}/{index_filename}'
+                    if subfolder_name
                     else index_filename
                 )
-                if target_index in files:
+                if target_index in filenames:
                     is_sharded = True
                     index_path = hf_hub_download(
-                        repo_id=path_or_repo_str,
-                        subfolder=subfolder,
+                        repo_id=root,
                         filename=index_filename,
+                        subfolder=subfolder,
                     )
                 target_quantization = (
-                    f'{subfolder}/quantization_config.json'
-                    if subfolder
+                    f'{subfolder_name}/quantization_config.json'
+                    if subfolder_name
                     else 'quantization_config.json'
                 )
-                if target_quantization in files:
+                if target_quantization in filenames:
                     quantization_path = hf_hub_download(
-                        repo_id=path_or_repo_str,
-                        subfolder=subfolder,
+                        repo_id=root,
                         filename='quantization_config.json',
+                        subfolder=subfolder,
                     )
                     native_qwix_directory = os.path.dirname(
                         quantization_path
                     )
-            except Exception as e:
-                print(f"Failed to fetch repo info: {e}")
+            except Exception as error:
+                print(f'Failed to fetch repo info: {error}')
                 is_sharded = False
 
-        # 2. Build files_to_load mapping: file_name -> list of keys (or None for all)
-        files_to_load = {}
+        files: dict[str, list[str] | None] = {}
         if is_sharded:
-            with open(index_path, "r") as f:
-                index_data = json.load(f)
-            weight_map = index_data.get("weight_map", {})
-            for k_str, file_name in weight_map.items():
-                if file_name not in files_to_load:
-                    files_to_load[file_name] = []
-                files_to_load[file_name].append(k_str)
+            with open(index_path) as index_file:
+                weight_map = json.load(index_file).get('weight_map', {})
+            for parameter_name, filename in weight_map.items():
+                files.setdefault(filename, []).append(parameter_name)
         else:
-            files_to_load[weights_filename] = None
+            files[weights_filename] = None
 
-        # 3. Resolve every checkpoint file before materializing any parameters.
-        resolved_files = {}
-        for file_name in files_to_load:
+        paths = {}
+        for filename in files:
             if local:
-                resolved_files[file_name] = os.path.join(
-                    path_or_repo_str,
-                    subfolder if subfolder else "",
-                    file_name,
+                paths[filename] = os.path.join(
+                    root,
+                    subfolder_name,
+                    filename,
                 )
             else:
-                resolved_files[file_name] = hf_hub_download(
-                    repo_id=path_or_repo_str,
+                paths[filename] = hf_hub_download(
+                    repo_id=root,
+                    filename=filename,
                     subfolder=subfolder,
-                    filename=file_name,
                 )
+        return _CheckpointSource(files, paths, native_qwix_directory)
 
-        # 4. Instantiate model skeleton using eval_shape (no memory allocation)
+    @staticmethod
+    def _reshape_checkpoint_tensor(
+        name: str,
+        value: np.ndarray,
+        target_shape: tuple[int, ...],
+        *,
+        stacked: bool = False,
+    ) -> np.ndarray:
+        """Canonicalize external linear/convolution layouts for one target."""
+        if value.ndim == 2 and (
+            name.endswith('.weight') or '.lora_' in name
+        ):
+            value = value.T
+        elif (
+            value.ndim >= 3
+            and name.endswith('.weight')
+            and value.shape != target_shape
+        ):
+            convolution_shape = (
+                *value.shape[2:],
+                value.shape[1],
+                value.shape[0],
+            )
+            if convolution_shape == target_shape:
+                value = value.transpose(*range(2, value.ndim), 1, 0)
+
+        if value.shape == target_shape:
+            return value
+        try:
+            return value.reshape(target_shape)
+        except ValueError as error:
+            target_name = 'stacked layer shape' if stacked else 'parameter shape'
+            raise ValueError(
+                f'Cannot load checkpoint tensor for {name!r}: shape '
+                f'{value.shape} is incompatible with {target_name} '
+                f'{target_shape}'
+            ) from error
+
+    @classmethod
+    def _materialize_pretrained(
+        cls,
+        path_or_repo: str,
+        config: tp.Any,
+        *,
+        source: _CheckpointSource,
+        original_config_dict: dict[str, tp.Any],
+        plain_dtype_override: str | None,
+        module_map: tp.Sequence,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        allow_unmatched: bool = False,
+        show_progress: bool = True,
+        load_chunk_bytes: int = 0,
+        **kwargs,
+    ) -> tp.Any:
+        files_to_load = source.files
+        resolved_files = source.paths
         rngs = kwargs.pop('rngs', nn.Rngs(0))
         state = jax.eval_shape(
             lambda: cls(
@@ -1847,9 +1502,9 @@ class PretrainedModel(nn.Module):
         # restore only the checkpoint spellings that were actually mapped.
         state.checkpoint_module_map = []
         checkpoint_keys_seen = set()
-        if native_qwix_directory is not None:
-            state.load_pretrained(native_qwix_directory)
-            state.base_model_name_or_path = path_or_repo_str
+        if source.native_qwix_directory is not None:
+            state.load_pretrained(source.native_qwix_directory)
+            state.base_model_name_or_path = path_or_repo
             return state
 
         current_state_dict = state.flat_parameter_dict()
@@ -2247,36 +1902,11 @@ class PretrainedModel(nn.Module):
                 for k_mapped, value in mapped_items:
                     if k_mapped in current_state_dict:
                         target_var = current_state_dict[k_mapped]
-
-                        if value.ndim == 2:
-                            if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
-                                value = value.T
-                        elif (
-                            value.ndim >= 3
-                            and k_mapped.endswith('.weight')
-                            and value.shape != target_var.shape
-                        ):
-                            convolution_shape = (
-                                *value.shape[2:],
-                                value.shape[1],
-                                value.shape[0],
-                            )
-                            if convolution_shape == target_var.shape:
-                                value = value.transpose(
-                                    *range(2, value.ndim),
-                                    1,
-                                    0,
-                                )
-                        if value.shape != target_var.shape:
-                            try:
-                                value = value.reshape(target_var.shape)
-                            except ValueError as error:
-                                raise ValueError(
-                                    f'Cannot load checkpoint tensor for '
-                                    f'{k_mapped!r}: shape {value.shape} is '
-                                    f'incompatible with parameter shape '
-                                    f'{target_var.shape}'
-                                ) from error
+                        value = cls._reshape_checkpoint_tensor(
+                            k_mapped,
+                            value,
+                            target_var.shape,
+                        )
                         placed = stage_parameter(
                             k_mapped,
                             value,
@@ -2298,36 +1928,12 @@ class PretrainedModel(nn.Module):
                                 target_var = current_state_dict[k_stacked]
 
                                 layer_shape = target_var.shape[1:]
-                                if value.ndim == 2:
-                                    if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
-                                        value = value.T
-                                elif (
-                                    value.ndim >= 3
-                                    and k_mapped.endswith('.weight')
-                                    and value.shape != layer_shape
-                                ):
-                                    convolution_shape = (
-                                        *value.shape[2:],
-                                        value.shape[1],
-                                        value.shape[0],
-                                    )
-                                    if convolution_shape == layer_shape:
-                                        value = value.transpose(
-                                            *range(2, value.ndim),
-                                            1,
-                                            0,
-                                        )
-                                if value.shape != layer_shape:
-                                    try:
-                                        value = value.reshape(layer_shape)
-                                    except ValueError as error:
-                                        raise ValueError(
-                                            f'Cannot load checkpoint tensor '
-                                            f'for {k_mapped!r}: shape '
-                                            f'{value.shape} is incompatible '
-                                            f'with stacked layer shape '
-                                            f'{layer_shape}'
-                                        ) from error
+                                value = cls._reshape_checkpoint_tensor(
+                                    k_mapped,
+                                    value,
+                                    layer_shape,
+                                    stacked=True,
+                                )
 
                                 stacked_state = stacked_states.get(k_stacked)
                                 if stacked_state is None:
@@ -2476,8 +2082,70 @@ class PretrainedModel(nn.Module):
             module_map,
         )
         state.load_flat_state_dict(new_state)
-        state.base_model_name_or_path = path_or_repo_str
+        state.base_model_name_or_path = path_or_repo
         return state
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo: PathLike,
+        config: tp.Any,
+        *,
+        module_map: tp.Sequence | None = None,
+        local: bool = False,
+        dtype: DType | None = None,
+        quant: tp.Any = None,
+        subfolder: PathLike | str | None = None,
+        weights_filename: str = 'model.safetensors',
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        allow_unmatched: bool = False,
+        show_progress: bool = True,
+        load_chunk_size: int | str | None = '1GB',
+        **kwargs,
+    ) -> tp.Self:
+        """Construct a model and stream a Safetensors checkpoint into it.
+
+        Configuration overrides, checkpoint discovery, abstract model
+        construction, and tensor materialization are independent stages.
+        ``load_chunk_size`` bounds host-side decoding batches; ``None`` or
+        ``0`` processes one mapped tensor group at a time.
+        """
+        original_config, dtype_override = cls._prepare_pretrained_config(
+            config,
+            dtype=dtype,
+            quant=quant,
+        )
+        source = cls._resolve_checkpoint_source(
+            path_or_repo,
+            local=local,
+            subfolder=subfolder,
+            weights_filename=weights_filename,
+        )
+        chunk_bytes = (
+            parse_size(load_chunk_size)
+            if load_chunk_size is not None
+            else 0
+        )
+        rules = (
+            cls._resolve_sharding_rules()
+            if sharding_rules is None
+            else sharding_rules
+        )
+        return cls._materialize_pretrained(
+            str(path_or_repo),
+            config,
+            source=source,
+            original_config_dict=original_config,
+            plain_dtype_override=dtype_override,
+            module_map=tuple(module_map or ()),
+            mesh=mesh,
+            sharding_rules=rules,
+            allow_unmatched=allow_unmatched,
+            show_progress=show_progress,
+            load_chunk_bytes=chunk_bytes,
+            **kwargs,
+        )
 
 __all__ = [
     'ModelOutput',

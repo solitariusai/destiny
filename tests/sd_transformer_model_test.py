@@ -110,26 +110,25 @@ def test_sd3_model_scans_compatible_layers_and_falls_back_for_mixed_layers():
     list_model = SD3TransformerModel(
         _config(context_pre_only=False),
         rngs=nn.Rngs(0),
-        use_list=True,
+        stack_type='list',
     )
     scanned_model = SD3TransformerModel(
         _config(context_pre_only=False),
         rngs=nn.Rngs(0),
-        use_list=False,
+        stack_type='stack',
     )
 
-    assert list_model.use_list
-    assert not scanned_model.use_list
+    assert list_model.stack_type == 'list'
+    assert scanned_model.stack_type == 'stack'
     assert isinstance(scanned_model.layers, nn.SeqStack)
     assert jnp.allclose(list_model(*inputs), scanned_model(*inputs), atol=1e-6)
 
     mixed_model = SD3TransformerModel(
         _config(),
         rngs=nn.Rngs(0),
-        use_list=False,
+        stack_type='stack',
     )
-    assert not mixed_model.requested_use_list
-    assert not mixed_model.use_list
+    assert mixed_model.stack_type == 'stack'
     assert isinstance(mixed_model.layers, nn.SeqStack)
     assert mixed_model.layers.group_sizes == (1, 1)
     assert jnp.allclose(
@@ -203,6 +202,6 @@ def test_maestro_resolves_sd3_diffusers_class_name():
 
     assert isinstance(model, SD3TransformerModel)
     assert isinstance(model, DiffusionTransformerModel)
-    assert not model.use_list
+    assert model.stack_type == 'stack'
     assert isinstance(model.layers, nn.SeqStack)
     assert model.layers.group_sizes == (1, 1)

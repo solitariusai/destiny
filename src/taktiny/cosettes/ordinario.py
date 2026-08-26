@@ -179,10 +179,10 @@ class DiffusionDenoiser(nn.Module):
 
             options = dict(load_kwargs)
             if (
-                'use_list' in options
-                and not cls._accepts_init_keyword(module_type, 'use_list')
+                'stack_type' in options
+                and not cls._accepts_init_keyword(module_type, 'stack_type')
             ):
-                options.pop('use_list')
+                options.pop('stack_type')
             per_component = options_by_name.get(name, {})
             if not isinstance(per_component, Mapping):
                 raise TypeError(

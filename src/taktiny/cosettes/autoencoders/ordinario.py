@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
-from taktiny.cosettes.overture import PretrainedModel
+from taktiny.maestro.overture import PretrainedModel
 
 
 class Autoencoder(PretrainedModel):

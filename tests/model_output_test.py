@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from taktiny.cosettes.overture import ModelOutput
+from taktiny.maestro.overture import ModelOutput
 
 
 def test_model_output_supports_mapping_and_attribute_access():

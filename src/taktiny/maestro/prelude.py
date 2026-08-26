@@ -25,6 +25,7 @@ from jax.experimental import mesh_utils
 
 from taktiny.maestro.livret import repertoire
 from taktiny.maestro.config import ModelConfig
+from taktiny.maestro.overture import PretrainedModel
 from taktiny.nn import Rngs
 from taktiny.nn.module import Module
 from taktiny.utils.typing import DType, LogicalRules, PathLike
@@ -146,10 +147,10 @@ class Maestro:
         local: bool = False,
         dtype: DType | str | None = None,
         quant: tp.Any = None,
-        use_list: bool = False,
+        stack_type: tp.Literal['stack', 'list'] | None = None,
         allow_unmatched: bool = False,
         **kwargs: tp.Any
-    ) -> Module:
+    ) -> PretrainedModel:
         """
         Load a registered model and materialize its checkpoint weights.
 
@@ -227,7 +228,7 @@ class Maestro:
             local=local,
             dtype=dtype,
             quant=quant,
-            use_list=use_list,
+            stack_type=stack_type,
             allow_unmatched=allow_unmatched,
             config=config,
             **kwargs
@@ -241,7 +242,6 @@ class Maestro:
         mesh: Mesh | Mapping[str, int] | None = None,
         sharding_rules: LogicalRules | None = None,
         local: bool = False,
-        use_list: bool = False,
         stack_type: tp.Literal['stack', 'list'] | None = None,
         **kwargs: tp.Any,
     ) -> Module:
@@ -308,7 +308,6 @@ class Maestro:
                 rngs=rngs,
                 mesh=mesh,
                 sharding_rules=sharding_rules,
-                use_list=use_list,
                 stack_type=stack_type,
                 **kwargs,
             )

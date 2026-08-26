@@ -55,6 +55,6 @@ def tiny_llama():
             pad_token_id=0,
             dtype=dtype,
         )
-        return Llama(config, rngs=nn.Rngs(0), use_list=False)
+        return Llama(config, rngs=nn.Rngs(0), stack_type='stack')
 
     return make
