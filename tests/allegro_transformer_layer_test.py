@@ -1,12 +1,12 @@
 import jax
 import jax.numpy as jnp
 
-from taktiny.cosettes import layers as ly
+from taktiny.cosette import layers as ly
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     ConditionalTransformerLayer,
 )
-from taktiny.cosettes.transformers.allegro import (
+from taktiny.cosette.transformers.allegro import (
     AllegroTransformerLayer,
 )
 from taktiny.maestro.config import ModelConfig

@@ -13,4 +13,4 @@
 # limitations under the License.
 from __future__ import annotations
 
-from taktiny.cosettes.schedulers import FlowMatchEulerDiscreteScheduler
+from taktiny.cosette.schedulers import FlowMatchEulerDiscreteScheduler

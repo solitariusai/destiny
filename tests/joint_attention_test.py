@@ -5,7 +5,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from taktiny import nn
-from taktiny.cosettes.layers import JointAttention
+from taktiny.cosette.layers import JointAttention
 from taktiny.utils.typing import ShardMode
 
 

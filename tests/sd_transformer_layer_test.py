@@ -1,10 +1,10 @@
 import jax
 import jax.numpy as jnp
 
-from taktiny.cosettes import layers as ly
+from taktiny.cosette import layers as ly
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import JointTransformerLayer
-from taktiny.cosettes.transformers.sd import SD3TransformerLayer
+from taktiny.cosette.transformers.ordinario import JointTransformerLayer
+from taktiny.cosette.transformers.sd import SD3TransformerLayer
 from taktiny.maestro.config import ModelConfig
 
 

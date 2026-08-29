@@ -7,7 +7,7 @@ import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from taktiny import nn
-from taktiny.cosettes.layers import (
+from taktiny.cosette.layers import (
     Transformer,
     TransformerDecoder,
     TransformerDecoderLayer,

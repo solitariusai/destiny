@@ -3,11 +3,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )
-from taktiny.cosettes.transformers.chroma import (
+from taktiny.cosette.transformers.chroma import (
     ChromaSingleTransformerLayer,
     ChromaTransformerLayer,
 )

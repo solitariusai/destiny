@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import pytest
 
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import StackLayer
+from taktiny.cosette.transformers.ordinario import StackLayer
 
 
 class _Layer(nn.Module):

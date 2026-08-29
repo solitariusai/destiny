@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from taktiny import nn
 import pytest
 
-from taktiny.cosettes.layers.ffn import MoEFFN, MoERouter
+from taktiny.cosette.layers.ffn import MoEFFN, MoERouter
 
 
 def test_moe_router_selects_and_normalizes_top_experts():

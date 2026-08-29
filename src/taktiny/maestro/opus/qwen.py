@@ -17,11 +17,11 @@ from __future__ import annotations
 
 from taktiny.maestro.livret import repertoire
 from taktiny.maestro.config import ModelConfig
-from taktiny.cosettes.transformers.qwen import (
+from taktiny.cosette.transformers.qwen import (
     Qwen2DecoderLayer,
     Qwen3DecoderLayer,
 )
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     TransformerCausalLM,
     TransformerModel,
 )

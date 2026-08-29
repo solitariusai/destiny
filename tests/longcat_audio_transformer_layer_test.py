@@ -3,10 +3,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     ConditionalTransformerLayer,
 )
-from taktiny.cosettes.transformers.longcat import (
+from taktiny.cosette.transformers.longcat import (
     LongCatAudioTransformerLayer,
 )
 from taktiny.maestro.config import ModelConfig

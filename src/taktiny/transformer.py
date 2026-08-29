@@ -13,18 +13,18 @@
 # limitations under the License.
 from __future__ import annotations
 
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     TransformerContext,
 )
 
 # Llama
-from taktiny.cosettes.transformers import LlamaDecoderLayer
+from taktiny.cosette.transformers import LlamaDecoderLayer
 
 # Qwen
-from taktiny.cosettes.transformers import Qwen2DecoderLayer
+from taktiny.cosette.transformers import Qwen2DecoderLayer
 
 # Gemma
-from taktiny.cosettes.transformers import (
+from taktiny.cosette.transformers import (
     GemmaDecoderLayer,
     Gemma2DecoderLayer,
     Gemma3DecoderLayer

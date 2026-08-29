@@ -20,13 +20,13 @@ import typing as tp
 
 import jax
 
-from taktiny.cosettes import layers as ly
+from taktiny.cosette import layers as ly
 from taktiny import nn
-from taktiny.cosettes.continuo import _config_value
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.continuo import _config_value
+from taktiny.cosette.transformers.ordinario import (
     DiffusionTransformerModel,
 )
-from taktiny.cosettes.transformers.sd import (
+from taktiny.cosette.transformers.sd import (
     SD3PatchEmbedding,
     SD3TransformerLayer,
 )

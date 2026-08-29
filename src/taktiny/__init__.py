@@ -20,7 +20,7 @@ __description__ = (
     "full-lifecycle trainers, and native architectures spanning Transformers, Diffusion, and SSMs."
 )
 
-from taktiny.cosettes import kernels, layers
+from taktiny.cosette import kernels, layers
 from taktiny.maestro.overture import ModelOutput
 from taktiny.maestro.prelude import Maestro
 from taktiny.maestro.config import ModelConfig

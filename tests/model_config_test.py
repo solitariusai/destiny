@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import pytest
 
 from taktiny import nn
-from taktiny.cosettes.layers import RotaryEmbedding
-from taktiny.cosettes.transformers.gemma import GemmaRMSNorm
+from taktiny.cosette.layers import RotaryEmbedding
+from taktiny.cosette.transformers.gemma import GemmaRMSNorm
 from taktiny.maestro.config import ModelConfig
 from taktiny.maestro.opus.gemma import (
     Gemma,
@@ -14,7 +14,7 @@ from taktiny.maestro.opus.gemma import (
 )
 from taktiny.maestro.opus.llama import Llama
 from taktiny.maestro.opus.qwen import Qwen2, Qwen3
-from taktiny.cosettes.transformers.qwen import (
+from taktiny.cosette.transformers.qwen import (
     Qwen2DecoderLayer,
     Qwen3DecoderLayer,
 )

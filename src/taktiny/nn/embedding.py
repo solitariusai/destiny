@@ -91,7 +91,7 @@ class Embedding(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply Stream Gather Reduce kernel for sparse embeddings / reductions."""
-        from taktiny.cosettes.kernels.gather_reduce_sc import sc_gather_reduce
+        from taktiny.cosette.kernels.gather_reduce_sc import sc_gather_reduce
         if jax.default_backend() != "tpu":
             gathered = operand[indices]
             if weights is not None:
@@ -114,7 +114,7 @@ class Embedding(nn.Module):
         **kwargs: Any,
     ) -> jax.Array:
         """Apply Ragged Gather kernel."""
-        from taktiny.cosettes.kernels.ragged.ragged_gather import ragged_gather
+        from taktiny.cosette.kernels.ragged.ragged_gather import ragged_gather
         return ragged_gather(operand, offsets, lengths, **kwargs)
 
     @classmethod

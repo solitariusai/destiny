@@ -13,7 +13,7 @@
 # limitations under the License.
 """Public autoencoder model API."""
 
-from taktiny.cosettes.autoencoders import Autoencoder, AutoencoderDC
+from taktiny.cosette.autoencoders import Autoencoder, AutoencoderDC
 
 
 __all__ = ['Autoencoder', 'AutoencoderDC']

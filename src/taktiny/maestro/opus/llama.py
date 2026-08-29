@@ -16,11 +16,11 @@
 from __future__ import annotations
 
 from taktiny.maestro.livret import repertoire
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     TransformerCausalLM,
     TransformerModel,
 )
-from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
+from taktiny.cosette.transformers.llama import LlamaDecoderLayer
 from taktiny.maestro.config import ModelConfig
 
 

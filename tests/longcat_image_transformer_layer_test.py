@@ -2,14 +2,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from taktiny.cosettes import layers as ly
+from taktiny.cosette import layers as ly
 from taktiny import nn
-from taktiny.cosettes.continuo import combine_joint_positions
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.continuo import combine_joint_positions
+from taktiny.cosette.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )
-from taktiny.cosettes.transformers.longcat import (
+from taktiny.cosette.transformers.longcat import (
     LongCatImageSingleTransformerLayer,
     LongCatImageTransformerLayer,
 )

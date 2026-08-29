@@ -21,15 +21,15 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
-from taktiny.cosettes.layers import _RotaryEmbedding
+from taktiny.cosette.layers import _RotaryEmbedding
 from taktiny.maestro.livret import repertoire
-from taktiny.cosettes.transformers.ordinario import (
+from taktiny.cosette.transformers.ordinario import (
     PositionEmbedding,
     PositionEmbeddings,
     TransformerCausalLM,
     TransformerModel,
 )
-from taktiny.cosettes.transformers.gemma import (
+from taktiny.cosette.transformers.gemma import (
     Gemma2DecoderLayer,
     Gemma3DecoderLayer,
     GemmaDecoderLayer,

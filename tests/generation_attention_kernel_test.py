@@ -2,7 +2,7 @@ import jax.numpy as jnp
 import pytest
 
 from taktiny import nn
-from taktiny.cosettes.transformers.ordinario import TransformerMultimodalLM
+from taktiny.cosette.transformers.ordinario import TransformerMultimodalLM
 from taktiny.maestro.config import ModelConfig
 from taktiny.maestro.opus.llama import Llama
 
