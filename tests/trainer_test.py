@@ -1214,6 +1214,55 @@ def test_gradient_accumulation_flushes_partial_epoch_window():
     assert trainer.log_history[-1]['step'] == 2
 
 
+def test_jitted_accumulation_accepts_smaller_final_batch():
+    batches = [
+        {
+            'x': np.asarray(values, dtype=np.float32),
+            'y': np.asarray(values, dtype=np.float32) * 2,
+        }
+        for values in (
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [7.0],
+        )
+    ]
+
+    eager_model = TinyModel()
+    eager_trainer = Trainer(
+        eager_model,
+        TrainingConfig(
+            optimizer=optax.sgd(0.1),
+            gradient_accumulation_steps=4,
+            jit_compile=False,
+        ),
+        DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
+    )
+    eager_trainer.train()
+
+    fused_model = TinyModel()
+    fused_trainer = Trainer(
+        fused_model,
+        TrainingConfig(
+            optimizer=optax.sgd(0.1),
+            gradient_accumulation_steps=4,
+            jit_compile=True,
+        ),
+        DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
+    )
+    fused_trainer.train()
+
+    assert fused_trainer.global_step == 1
+    assert fused_trainer.micro_step == 4
+    assert float(fused_model.weight.value) == pytest.approx(
+        float(eager_model.weight.value),
+        rel=1e-6,
+        abs=1e-6,
+    )
+
+
 def test_global_gradient_clipping_limits_update_norm():
     model = TinyModel()
     trainer = Trainer(

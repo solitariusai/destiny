@@ -2484,10 +2484,36 @@ class Trainer:
                     # step run inside a single jitted ``lax.scan``. Gradient
                     # trees never round-trip through Python and accumulate in
                     # place inside the loop body, removing the per-microbatch
-                    # copies of the eager path. Microbatches must share one
-                    # batch structure; partial chunks at epoch boundaries reuse
-                    # the same compiled function through a per-size cache.
+                    # copies of the eager path. Shape-compatible runs are
+                    # scanned separately so a smaller final dataloader batch
+                    # can still participate in the same optimizer update.
                     fused_cache: dict[int, Any] = {}
+
+                    def batch_signature(batch: Any) -> tuple[Any, ...]:
+                        leaves, structure = jax.tree.flatten(batch)
+                        return (
+                            structure,
+                            tuple(
+                                (
+                                    tuple(value.shape),
+                                    value.dtype,
+                                )
+                                for value in leaves
+                            ),
+                        )
+
+                    def compatible_runs(
+                        chunk: list[Any],
+                    ) -> list[list[Any]]:
+                        runs: list[list[Any]] = []
+                        signature = None
+                        for batch in chunk:
+                            current_signature = batch_signature(batch)
+                            if signature != current_signature:
+                                runs.append([])
+                                signature = current_signature
+                            runs[-1].append(batch)
+                        return runs
 
                     def make_fused_step(num_batches: int) -> Any:
                         def fused_step(
@@ -2578,30 +2604,42 @@ class Trainer:
                         if not chunk:
                             break
                         num_batches = len(chunk)
-                        stacked_batch = jax.tree.map(
-                            lambda *values: jnp.stack(values),
-                            *chunk,
+                        accumulated_grads = _zeros_like_grads(
+                            trainable_params
                         )
-                        keys = jnp.stack([
-                            jax.random.fold_in(
-                                self.rngs(),
-                                jax.process_index(),
-                            )
-                            for _ in range(num_batches)
-                        ])
-                        accumulated_grads, accumulated_loss = (
-                            get_fused_step(num_batches)(
-                                _zeros_like_grads(trainable_params),
-                                trainable_params,
-                                frozen_params,
-                                stacked_batch,
-                                keys,
-                                jnp.asarray(
-                                    self.loss_scale,
-                                    dtype=jnp.float32,
-                                ),
-                            )
+                        accumulated_loss = jnp.asarray(
+                            0.0,
+                            dtype=jnp.float32,
                         )
+                        for run in compatible_runs(chunk):
+                            run_size = len(run)
+                            stacked_batch = jax.tree.map(
+                                lambda *values: jnp.stack(values),
+                                *run,
+                            )
+                            keys = jnp.stack([
+                                jax.random.fold_in(
+                                    self.rngs(),
+                                    jax.process_index(),
+                                )
+                                for _ in range(run_size)
+                            ])
+                            accumulated_grads, run_loss = (
+                                get_fused_step(run_size)(
+                                    accumulated_grads,
+                                    trainable_params,
+                                    frozen_params,
+                                    stacked_batch,
+                                    keys,
+                                    jnp.asarray(
+                                        self.loss_scale,
+                                        dtype=jnp.float32,
+                                    ),
+                                )
+                            )
+                            accumulated_loss = (
+                                accumulated_loss + run_loss
+                            )
                         accumulated_microbatches = num_batches
                         step_in_epoch += num_batches
                         self.micro_step += num_batches
