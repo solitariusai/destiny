@@ -1,67 +1,12 @@
 [project]
-name = "taktiny"
+name = "destiny"
 version = "0.0.1"
-description = "A Deep Learning framework built on JAX"
+description = "A JAX library for neural network model development and pretrained model workflows."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aqtp>=0.9.0",
-    "datasets>=5.0.1",
-    "grain>=0.2.18",
-    "huggingface-hub>=1.22.0",
-    "jax>=0.10.2",
-    "maturin>=1.14.1",
-    "orbax-checkpoint>=0.12.1",
-    "qwix>=0.1.8",
-    "safetensors>=0.8.0",
-    "transformers>=5.13.0",
-]
-classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
-]
-
-[project.optional-dependencies]
-tensorboard = ["tensorboardX"]
-wandb = ["wandb"]
-reporting = ["tensorboardX", "wandb"]
-
-[build-system]
-requires = ["hatchling", "maturin>=1.14,<2.0"]
-# build-backend = "hatchling.build"
-build-backend = "maturin"
-
-[dependency-groups]
-dev = [
-    "diffusers>=0.39.0",
-    "equinox>=0.13.8",
-    "flax>=0.12.7",
-    "optax>=0.2.8",
-    "pytest>=9.1.1",
     "taktiny",
-    "tiktoken>=0.13.0",
-    "torchvision>=0.27.1",
-]
-
-[tool.pytest.ini_options]
-markers = [
-    "gpu: requires a JAX GPU backend",
-    "tpu: requires a JAX TPU backend",
-]
-
-[tool.maturin]
-python-source = "src"
-module-name = "taktinylib._taktinylib"
-python-packages = ["taktiny", "taktinylib"]
-
-[tool.uv]
-cache-keys = [
-    { file = "pyproject.toml" },
-    { file = "Cargo.toml" },
-    { file = "Cargo.lock" },
-    { file = "src/**/*.rs" },
 ]
 
 [tool.uv.sources]
-taktiny = { workspace = true }
+taktiny = { git = "https://github.com/solitariusai/taktiny.git", rev = "experiment" }
