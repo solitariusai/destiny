@@ -1,7 +1,0 @@
-- NEVER execute destructive Git commands under any circumstance:
-    - FORBIDDEN: `git checkout <path>`
-    - FORBIDDEN: `git restore`
-    - FORBIDDEN: `git reset --hard`
-    - FORBIDDEN: `git clean`
-- NEVER discard, overwrite, or revert uncommitted changes in the user's working tree.
-- Only stage specific target files explicitly (e.g., `git add src/...`).
