@@ -24,7 +24,7 @@ from destiny.cosette.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 
 
 class ChromaTransformerLayer(JointTransformerLayer):

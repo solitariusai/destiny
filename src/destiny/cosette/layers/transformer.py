@@ -14,7 +14,6 @@
 """Generic encoder-decoder transformer modules."""
 
 from __future__ import annotations
-from destiny.cosette.layers import Attention
 
 import inspect
 import math
@@ -34,6 +33,7 @@ from taktiny.nn.continuo import (
 from destiny.cosette.layers.attention import Attention, JointAttention
 from destiny.cosette.layers.ffn import FeedForward, GLUMBConv
 from destiny.cosette.layers.normalization import AdaXNorm, NormType
+from destiny.cosette.utils import AxisName
 from destiny.utils.typing import (
     Activation,
     DType,
@@ -223,10 +223,12 @@ class TransformerEncoderLayer(nn.Module):
             bias=bias,
             dtype=dtype,
             rngs=rngs,
-            q_axis_names=('embed', 'heads', 'head_dim'),
-            k_axis_names=('embed', 'heads', 'head_dim'),
-            v_axis_names=('embed', 'heads', 'head_dim'),
-            o_axis_names=('heads', 'head_dim', 'embed'),
+            axis_names=AxisName.set_axis_names(
+                q_proj=('embed', 'heads', 'head_dim'),
+                k_proj=('embed', 'heads', 'head_dim'),
+                v_proj=('embed', 'heads', 'head_dim'),
+                o_proj=('heads', 'head_dim', 'embed'),
+            ),
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,
@@ -239,8 +241,10 @@ class TransformerEncoderLayer(nn.Module):
             bias=bias,
             dtype=dtype,
             rngs=rngs,
-            input_axis_names=('embed', 'mlp'),
-            output_axis_names=('mlp', 'embed'),
+            axis_names=AxisName.set_axis_names(
+                input=('embed', 'mlp'),
+                output=('mlp', 'embed'),
+            ),
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,
@@ -345,10 +349,12 @@ class TransformerDecoderLayer(nn.Module):
             'bias': bias,
             'dtype': dtype,
             'rngs': rngs,
-            'q_axis_names': ('embed', 'heads', 'head_dim'),
-            'k_axis_names': ('embed', 'heads', 'head_dim'),
-            'v_axis_names': ('embed', 'heads', 'head_dim'),
-            'o_axis_names': ('heads', 'head_dim', 'embed'),
+            'axis_names': AxisName.set_axis_names(
+                q_proj=('embed', 'heads', 'head_dim'),
+                k_proj=('embed', 'heads', 'head_dim'),
+                v_proj=('embed', 'heads', 'head_dim'),
+                o_proj=('heads', 'head_dim', 'embed'),
+            ),
             'shard_mode': shard_mode,
             'quant': quant,
             'dot_general': dot_general,
@@ -363,8 +369,10 @@ class TransformerDecoderLayer(nn.Module):
             bias=bias,
             dtype=dtype,
             rngs=rngs,
-            input_axis_names=('embed', 'mlp'),
-            output_axis_names=('mlp', 'embed'),
+            axis_names=AxisName.set_axis_names(
+                input=('embed', 'mlp'),
+                output=('mlp', 'embed'),
+            ),
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,
@@ -979,10 +987,12 @@ class ConditionalTransformerLayer(nn.Module):
                 'qk_norm_eps': qkv_norm_eps,
                 'dtype': dtype,
                 'rngs': rngs,
-                'q_axis_names': ('embed', 'heads', 'head_dim'),
-                'k_axis_names': ('embed', 'heads', 'head_dim'),
-                'v_axis_names': ('embed', 'heads', 'head_dim'),
-                'o_axis_names': ('heads', 'head_dim', 'embed'),
+                'axis_names': AxisName.set_axis_names(
+                    q_proj=('embed', 'heads', 'head_dim'),
+                    k_proj=('embed', 'heads', 'head_dim'),
+                    v_proj=('embed', 'heads', 'head_dim'),
+                    o_proj=('heads', 'head_dim', 'embed'),
+                ),
                 'dropout': self.dropout,
                 'shard_mode': shard_mode,
                 'quant': quant,
@@ -1011,25 +1021,27 @@ class ConditionalTransformerLayer(nn.Module):
                     'qk_norm_eps': qkv_norm_eps,
                     'dtype': dtype,
                     'rngs': rngs,
-                    'q_axis_names': (
-                        'embed',
-                        'cross_heads',
-                        'cross_head_dim',
-                    ),
-                    'k_axis_names': (
-                        'context_embed',
-                        'cross_heads',
-                        'cross_head_dim',
-                    ),
-                    'v_axis_names': (
-                        'context_embed',
-                        'cross_heads',
-                        'cross_head_dim',
-                    ),
-                    'o_axis_names': (
-                        'cross_heads',
-                        'cross_head_dim',
-                        'embed',
+                    'axis_names': AxisName.set_axis_names(
+                        q_proj=(
+                            'embed',
+                            'cross_heads',
+                            'cross_head_dim',
+                        ),
+                        k_proj=(
+                            'context_embed',
+                            'cross_heads',
+                            'cross_head_dim',
+                        ),
+                        v_proj=(
+                            'context_embed',
+                            'cross_heads',
+                            'cross_head_dim',
+                        ),
+                        o_proj=(
+                            'cross_heads',
+                            'cross_head_dim',
+                            'embed',
+                        ),
                     ),
                     'dropout': self.dropout,
                     'shard_mode': shard_mode,
@@ -1447,10 +1459,12 @@ class JointTransformerLayer(nn.Module):
                 'qk_norm_eps': qkv_norm_eps,
                 'dtype': dtype,
                 'rngs': rngs,
-                'q_axis_names': ('embed', 'heads', 'head_dim'),
-                'k_axis_names': ('embed', 'heads', 'head_dim'),
-                'v_axis_names': ('embed', 'heads', 'head_dim'),
-                'o_axis_names': ('heads', 'head_dim', 'embed'),
+                'axis_names': AxisName.set_axis_names(
+                    q_proj=('embed', 'heads', 'head_dim'),
+                    k_proj=('embed', 'heads', 'head_dim'),
+                    v_proj=('embed', 'heads', 'head_dim'),
+                    o_proj=('heads', 'head_dim', 'embed'),
+                ),
                 'scaling': scaling,
                 'context_first': context_first,
                 'shard_mode': shard_mode,
@@ -1472,10 +1486,12 @@ class JointTransformerLayer(nn.Module):
                     'qk_norm_eps': qkv_norm_eps,
                     'dtype': dtype,
                     'rngs': rngs,
-                    'q_axis_names': ('embed', 'heads', 'head_dim'),
-                    'k_axis_names': ('embed', 'heads', 'head_dim'),
-                    'v_axis_names': ('embed', 'heads', 'head_dim'),
-                    'o_axis_names': ('heads', 'head_dim', 'embed'),
+                    'axis_names': AxisName.set_axis_names(
+                        q_proj=('embed', 'heads', 'head_dim'),
+                        k_proj=('embed', 'heads', 'head_dim'),
+                        v_proj=('embed', 'heads', 'head_dim'),
+                        o_proj=('heads', 'head_dim', 'embed'),
+                    ),
                     'scaling': scaling,
                     'shard_mode': shard_mode,
                     'quant': quant,
@@ -1505,8 +1521,10 @@ class JointTransformerLayer(nn.Module):
                 'bias': bias,
                 'dtype': dtype,
                 'rngs': rngs,
-                'input_axis_names': ('embed', 'mlp'),
-                'output_axis_names': ('mlp', 'embed'),
+                'axis_names': AxisName.set_axis_names(
+                    input=('embed', 'mlp'),
+                    output=('mlp', 'embed'),
+                ),
                 'shard_mode': shard_mode,
                 'quant': quant,
                 'dot_general': dot_general,
@@ -1536,8 +1554,10 @@ class JointTransformerLayer(nn.Module):
                     'bias': bias,
                     'dtype': dtype,
                     'rngs': rngs,
-                    'input_axis_names': ('context_embed', 'context_mlp'),
-                    'output_axis_names': ('context_mlp', 'context_embed'),
+                    'axis_names': AxisName.set_axis_names(
+                        input=('context_embed', 'context_mlp'),
+                        output=('context_mlp', 'context_embed'),
+                    ),
                     'shard_mode': shard_mode,
                     'quant': quant,
                     'dot_general': dot_general,

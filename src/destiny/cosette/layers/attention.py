@@ -19,17 +19,16 @@ import typing as tp
 
 import jax
 import jax.numpy as jnp
-from taktiny import nn
+import taktiny.nn as nn
 from taktiny.nn.continuo import _constrain
 
+from destiny.cosette.utils import AxisName
 from destiny.utils.typing import (
-    AxisNames,
     DType,
     Initializer,
-    Sharding,
     ShardMode,
+    Sharding,
 )
-
 
 class _AcrossHeadsRMSNorm(nn.Module):
     """RMS-normalize the combined heads and head-width dimensions."""
@@ -78,11 +77,11 @@ class Attention(nn.Module):
         num_kv_heads: int | None = None,
         context_dim: int | None = None,
         apply_position_fn: tp.Callable | None = None,
-        bias: bool | tp.Sequence[bool] = False,
+        bias: bool | list[bool] | tuple[bool] = False,
         q_norm: bool | nn.Module = False,
         k_norm: bool | nn.Module = False,
         qk_norm: bool = False,
-        qk_norm_across_heads: bool | tp.Sequence[bool] = False,
+        qk_norm_across_heads: bool | list[bool] | tuple[bool] = False,
         epsilon: float = 1e-5,
         window_size: int | None = None,
         scaling: float | None = None,
@@ -91,10 +90,7 @@ class Attention(nn.Module):
         dtype: DType | None = None,
         rngs: nn.Rngs,
         quant: tp.Any = None,
-        q_axis_names: AxisNames | None = None,
-        k_axis_names: AxisNames | None = None,
-        v_axis_names: AxisNames | None = None,
-        o_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         dot_general: tp.Any = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
@@ -121,13 +117,20 @@ class Attention(nn.Module):
 
         self.apply_position_fn = apply_position_fn
         q_bias = k_bias = v_bias = o_bias = False
-        if isinstance(bias, tp.Sequence):
-            assert len(bias) == 4, 'expect `bias` length 4'
-            q_bias = bias[0]
-            k_bias = bias[1]
-            v_bias = bias[2]
-            o_bias = bias[3]
-            bias = False
+        if isinstance(bias, (list, tuple)):
+            if len(bias) != 4:
+                raise ValueError('bias must contain q, k, v, and o values')
+            if not all(isinstance(value, bool) for value in bias):
+                raise TypeError('bias values must be booleans')
+            q_bias, k_bias, v_bias, o_bias = bias
+            bias = all(bias)
+        elif not isinstance(bias, bool):
+            raise TypeError('bias must be a boolean or four booleans')
+
+        q_proj_axis_names = None if axis_names is None else axis_names.get('q_proj')
+        k_proj_axis_names = None if axis_names is None else axis_names.get('k_proj')
+        v_proj_axis_names = None if axis_names is None else axis_names.get('v_proj')
+        o_proj_axis_names = None if axis_names is None else axis_names.get('o_proj')
 
         self.q_proj = nn.Linear(
             hidden_size, 
@@ -135,7 +138,7 @@ class Attention(nn.Module):
             dtype=dtype, 
             bias=q_bias or bias, 
             rngs=rngs,
-            axis_names=q_axis_names, 
+            axis_names=q_proj_axis_names,
             shard_mode=shard_mode,
             quant=quant, 
             dot_general=dot_general
@@ -146,7 +149,7 @@ class Attention(nn.Module):
             dtype=dtype, 
             bias=k_bias or bias, 
             rngs=rngs, 
-            axis_names=k_axis_names,
+            axis_names=k_proj_axis_names,
             shard_mode=shard_mode, 
             quant=quant, 
             dot_general=dot_general
@@ -157,7 +160,7 @@ class Attention(nn.Module):
             dtype=dtype, 
             bias=v_bias or bias, 
             rngs=rngs, 
-            axis_names=v_axis_names,
+            axis_names=v_proj_axis_names,
             shard_mode=shard_mode, 
             quant=quant, 
             dot_general=dot_general
@@ -168,7 +171,7 @@ class Attention(nn.Module):
             dtype=dtype, 
             bias=o_bias or bias, 
             rngs=rngs, 
-            axis_names=o_axis_names,
+            axis_names=o_proj_axis_names,
             shard_mode=shard_mode, 
             quant=quant, 
             dot_general=dot_general
@@ -177,10 +180,21 @@ class Attention(nn.Module):
         self.q_norm = q_norm if isinstance(q_norm, nn.Module) else None
         self.k_norm = k_norm if isinstance(k_norm, nn.Module) else None
         q_norm_across_heads = k_norm_across_heads = False
-        if isinstance(qk_norm_across_heads, tp.Sequence):
-            assert len(qk_norm_across_heads) == 2, 'expect `qk_norm_across_heads` length 2'
+        if isinstance(qk_norm_across_heads, (list, tuple)):
+            if len(qk_norm_across_heads) != 2:
+                raise ValueError(
+                    'qk_norm_across_heads must contain q and k values'
+                )
+            if not all(
+                isinstance(value, bool) for value in qk_norm_across_heads
+            ):
+                raise TypeError('qk_norm_across_heads values must be booleans')
             q_norm_across_heads = qk_norm_across_heads[0]
             k_norm_across_heads = qk_norm_across_heads[1]
+        elif not isinstance(qk_norm_across_heads, bool):
+            raise TypeError(
+                'qk_norm_across_heads must be a boolean or two booleans'
+            )
 
         if self.q_norm is None and (qk_norm or q_norm):
             q_norm_shape = (
@@ -189,11 +203,11 @@ class Attention(nn.Module):
                 else self.head_dim
             )
             q_norm_axis_names = (
-                q_axis_names[1:]
-                if q_norm_across_heads and q_axis_names is not None
+                q_proj_axis_names[1:]
+                if q_norm_across_heads and q_proj_axis_names is not None
                 else (
-                    q_axis_names[-1:]
-                    if q_axis_names is not None
+                    q_proj_axis_names[-1:]
+                    if q_proj_axis_names is not None
                     else None
                 )
             )
@@ -213,11 +227,11 @@ class Attention(nn.Module):
                 else self.head_dim
             )
             k_norm_axis_names = (
-                k_axis_names[1:]
-                if k_norm_across_heads and k_axis_names is not None
+                k_proj_axis_names[1:]
+                if k_norm_across_heads and k_proj_axis_names is not None
                 else (
-                    k_axis_names[-1:]
-                    if k_axis_names is not None
+                    k_proj_axis_names[-1:]
+                    if k_proj_axis_names is not None
                     else None
                 )
             )
@@ -667,10 +681,7 @@ class JointAttention(nn.Module):
         qk_norm_eps: float = 1e-5,
         dtype: DType | str | None = None,
         rngs: nn.Rngs | None = None,
-        q_axis_names: AxisNames | None = None,
-        k_axis_names: AxisNames | None = None,
-        v_axis_names: AxisNames | None = None,
-        o_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         q_bias: bool | None = None,
         k_bias: bool | None = None,
         v_bias: bool | None = None,
@@ -714,6 +725,10 @@ class JointAttention(nn.Module):
             'quant': quant,
             'dot_general': dot_general,
         }
+        q_axis_names = None if axis_names is None else axis_names.get('q_proj')
+        k_axis_names = None if axis_names is None else axis_names.get('k_proj')
+        v_axis_names = None if axis_names is None else axis_names.get('v_proj')
+        o_axis_names = None if axis_names is None else axis_names.get('o_proj')
 
         self.q_proj_1 = nn.Linear(
             hidden_size1,
@@ -911,10 +926,7 @@ class AttentionPooling(Attention):
         epsilon: float = 1e-5,
         dtype: DType | str | None = None,
         rngs: nn.Rngs,
-        q_axis_names: AxisNames | None = None,
-        k_axis_names: AxisNames | None = None,
-        v_axis_names: AxisNames | None = None,
-        o_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         scaling: float | None = None,
         softcap: float | None = None,
         dropout: float = 0.0,
@@ -932,10 +944,7 @@ class AttentionPooling(Attention):
             epsilon=epsilon,
             dtype=dtype,
             rngs=rngs,
-            q_axis_names=q_axis_names,
-            k_axis_names=k_axis_names,
-            v_axis_names=v_axis_names,
-            o_axis_names=o_axis_names,
+            axis_names=axis_names,
             scaling=scaling,
             softcap=softcap,
             dropout=dropout,
@@ -1005,7 +1014,7 @@ class TokenResampler(nn.Module):
         dtype: DType = jnp.float32,
         rngs: nn.Rngs,
         initializer: Initializer = _resampler_query_initializer,
-        axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if not isinstance(num_queries, int) or num_queries <= 0:
@@ -1032,9 +1041,12 @@ class TokenResampler(nn.Module):
                 raise TypeError(
                     f'{name} must be an initialized nn.Module or None'
                 )
-        if axis_names is not None and len(axis_names) != 2:
+        query_axis_names = (
+            None if axis_names is None else axis_names.get('queries')
+        )
+        if query_axis_names is not None and len(query_axis_names) != 2:
             raise ValueError(
-                'axis_names must contain query and embedding axes'
+                'axis_names.queries must contain query and embedding axes'
             )
         if (
             include_queries_in_context
@@ -1064,8 +1076,8 @@ class TokenResampler(nn.Module):
                 dtype,
             )
         )
-        if axis_names is not None:
-            self.queries.axis_names = tuple(axis_names)
+        if query_axis_names is not None:
+            self.queries.axis_names = query_axis_names
 
     @staticmethod
     def _normalize_mask(
@@ -1194,9 +1206,7 @@ class TokenResampler(nn.Module):
 
 __all__ = [
     'Attention',
-    'Attention',
     'AttentionPooling',
     'JointAttention',
-    'SegmentIds',
     'TokenResampler',
 ]

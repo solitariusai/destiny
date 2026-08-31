@@ -29,10 +29,9 @@ from destiny.cosette.transformers.ordinario import (
     GatedParallelTransformerLayer,
     JointTransformerLayer,
 )
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 from destiny.utils.typing import (
     Activation,
-    AxisNames,
     DType,
     Sharding,
     ShardMode,
@@ -113,7 +112,7 @@ class Flux2Modulation(nn.Module):
         bias: bool = False,
         dtype: DType | None = None,
         rngs: nn.Rngs,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: tp.Any = None,
         dot_general: tp.Any = None,
@@ -178,8 +177,8 @@ class Flux2FeedForward(nn.Module):
         bias: bool = False,
         dtype: DType | None = None,
         rngs: nn.Rngs,
-        input_axis_names: AxisNames | None = None,
-        output_axis_names: AxisNames | None = None,
+        input_axis_names: tuple[str | None, ...] | None = None,
+        output_axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: tp.Any = None,
         dot_general: tp.Any = None,

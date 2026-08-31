@@ -26,7 +26,7 @@ from taktiny.nn.continuo import _constrain
 from destiny.cosette import layers as ly
 from destiny.cosette.continuo import _approximate_gelu
 from destiny.cosette.transformers.ordinario import JointTransformerLayer
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 from destiny.utils.typing import DType, ShardMode
 
 

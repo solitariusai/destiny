@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from destiny.cosette.transformer import TransformerDecoderLayer
+from destiny.maestro.transformer import TransformerDecoderLayer
 
 
 # ┏━┓╻ ╻┏━╸┏┓╻   ┏━┓

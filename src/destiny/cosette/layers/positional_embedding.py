@@ -24,7 +24,7 @@ import jax.numpy as jnp
 from taktiny import nn
 from taktiny.nn.continuo import _constrain
 
-from destiny.utils.typing import AxisNames, DType, ShardMode
+from destiny.utils.typing import DType, ShardMode
 
 
 class RopeParameters(TypedDict):
@@ -377,7 +377,7 @@ class FrequencyEmbedding(nn.Module):
         trainable: bool = False,
         dtype: DType = jnp.float32,
         rngs: nn.Rngs | None = None,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if not isinstance(embedding_dim, int) or embedding_dim <= 0:

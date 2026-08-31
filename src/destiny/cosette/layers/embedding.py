@@ -35,7 +35,6 @@ from destiny.cosette.layers.positional_embedding import FrequencyEmbedding
 from destiny.utils.typing import (
     Activation,
     ArrayLike,
-    AxisNames,
     DType,
     Initializer,
     ShardMode,
@@ -302,7 +301,7 @@ class PatchEmbedding(nn.Module):
         rngs: nn.Rngs,
         initializer: Initializer = default_conv_initializer,
         bias_initializer: Initializer = zeros,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if not isinstance(embedding_dim, int) or embedding_dim <= 0:

@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 from taktiny import nn
 
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 from destiny.utils.typing import DType, ShardMode
 
 

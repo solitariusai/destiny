@@ -23,7 +23,7 @@ from taktiny import nn
 from destiny.cosette import layers as ly
 from destiny.cosette.continuo import _config_value
 from destiny.cosette.transformers.ordinario import ConditionalTransformerLayer
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 
 
 class AllegroTransformerLayer(ConditionalTransformerLayer):

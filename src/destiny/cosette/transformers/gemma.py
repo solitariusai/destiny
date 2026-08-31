@@ -22,9 +22,9 @@ import jax
 import jax.numpy as jnp
 from taktiny import nn
 
-from destiny.cosette.transformer import TransformerDecoderLayer
-from destiny.maestro.utils import ModelConfig
-from destiny.utils.typing import Axes, AxisNames, DType, Initializer, ShardMode
+from destiny.maestro.transformer import TransformerDecoderLayer
+from destiny.cosette.utils import ModelConfig
+from destiny.utils.typing import Axes, DType, Initializer, ShardMode
 
 
 # ┏━╸┏━╸┏┳┓┏┳┓┏━┓
@@ -36,11 +36,11 @@ class GemmaTextScaledWordEmbedding(nn.Embedding):
         num_embeddings: int,
         embedding_dim: int,
         *,
-        initializer: Initializer | None = None,
+        initializer: Initializer = jax.nn.initializers.normal(0.02),
         dtype: DType = 'float32',
         rngs: nn.Rngs | None = None,
         quant: tp.Any = None,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: tp.Any = ShardMode.AUTO,
     ) -> None:
         super().__init__(
@@ -70,7 +70,7 @@ class GemmaRMSNorm(nn.RMSNorm):
         *,
         axes: Axes | None = None,
         dtype: DType | None = None,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         super().__init__(
@@ -131,13 +131,21 @@ class Gemma2DecoderLayer(GemmaDecoderLayer):
         self.norm3 = GemmaRMSNorm(
             config.hidden_size,
             config.rms_norm_eps,
-            axis_names=config.rmsnorm_weight_axis_names,
+            axis_names=(
+                None
+                if self.axis_names is None
+                else self.axis_names.get('norm_weight')
+            ),
             shard_mode=config.shard_mode,
         )
         self.norm4 = GemmaRMSNorm(
             config.hidden_size,
             config.rms_norm_eps,
-            axis_names=config.rmsnorm_weight_axis_names,
+            axis_names=(
+                None
+                if self.axis_names is None
+                else self.axis_names.get('norm_weight')
+            ),
             shard_mode=config.shard_mode,
         )
 
@@ -190,16 +198,27 @@ class Gemma3DecoderLayer(Gemma2DecoderLayer):
             config.head_dim
             or config.hidden_size // config.num_attention_heads
         )
+        axis_names = kwargs.get('axis_names')
+        q_proj_axis_names = (
+            None if axis_names is None else axis_names.get('q_proj')
+        )
+        k_proj_axis_names = (
+            None if axis_names is None else axis_names.get('k_proj')
+        )
         q_norm = GemmaRMSNorm(
             head_dim,
             config.rms_norm_eps,
-            axis_names=config.attention_q_proj_axis_names[-1:],
+            axis_names=(
+                None if q_proj_axis_names is None else q_proj_axis_names[-1:]
+            ),
             shard_mode=config.shard_mode,
         )
         k_norm = GemmaRMSNorm(
             head_dim,
             config.rms_norm_eps,
-            axis_names=config.attention_k_proj_axis_names[-1:],
+            axis_names=(
+                None if k_proj_axis_names is None else k_proj_axis_names[-1:]
+            ),
             shard_mode=config.shard_mode,
         )
         _attention_kwargs = {

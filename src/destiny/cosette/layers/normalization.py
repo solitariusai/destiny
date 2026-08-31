@@ -32,7 +32,6 @@ from taktiny.nn.linear import default_linear_initializer
 from destiny.utils.typing import (
     Activation,
     Axes,
-    AxisNames,
     DType,
     Initializer,
     ShardMode,
@@ -72,7 +71,7 @@ class AdaXNorm(nn.Module):
         project: bool = True,
         quant: Any = None,
         dot_general: Any = None,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         self.embedding_dim = _validate_integer(embedding_dim, 'embedding_dim')
@@ -225,7 +224,7 @@ class SpatialNorm(nn.Module):
         initializer: Initializer = default_linear_initializer,
         quant: Any = None,
         dot_general: Any = None,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         self.f_channels = _validate_integer(f_channels, 'f_channels')

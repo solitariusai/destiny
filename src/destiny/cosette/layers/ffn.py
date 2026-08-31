@@ -25,7 +25,8 @@ import jax.numpy as jnp
 from taktiny import nn
 from taktiny.nn.continuo import _constrain, _resolve_activation
 
-from destiny.utils.typing import Activation, AxisNames, DType, ShardMode
+from destiny.cosette.utils import AxisName
+from destiny.utils.typing import Activation, DType, ShardMode
 
 
 class FeedForward(nn.Module):
@@ -45,8 +46,7 @@ class FeedForward(nn.Module):
         dtype: DType | None = None,
         bias: bool = True,
         rngs: nn.Rngs,
-        input_axis_names: AxisNames | None = None,
-        output_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -63,7 +63,7 @@ class FeedForward(nn.Module):
             bias=bias,
             dtype=dtype,
             rngs=rngs,
-            axis_names=input_axis_names,
+            axis_names=None if axis_names is None else axis_names.get('input'),
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,
@@ -74,7 +74,7 @@ class FeedForward(nn.Module):
             bias=bias,
             dtype=dtype,
             rngs=rngs,
-            axis_names=output_axis_names,
+            axis_names=None if axis_names is None else axis_names.get('output'),
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,
@@ -241,9 +241,7 @@ class GateMLP(nn.Module):
         bias: bool = False,
         dtype: DType | None = None,
         rngs: nn.Rngs | None = None,
-        gate_axis_names: AxisNames | None = None,
-        up_axis_names: AxisNames | None = None,
-        down_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -253,21 +251,21 @@ class GateMLP(nn.Module):
         self.gate_proj = nn.Linear(
             hidden_size, intermediate_size,
             bias=bias, dtype=dtype, rngs=rngs,
-            axis_names=gate_axis_names,
+            axis_names=None if axis_names is None else axis_names.get('g_proj'),
             shard_mode=shard_mode,
             quant=quant, dot_general=dot_general
         )
         self.up_proj = nn.Linear(
             hidden_size, intermediate_size,
             bias=bias, dtype=dtype, rngs=rngs,
-            axis_names=up_axis_names,
+            axis_names=None if axis_names is None else axis_names.get('u_proj'),
             shard_mode=shard_mode,
             quant=quant, dot_general=dot_general
         )
         self.down_proj = nn.Linear(
             intermediate_size, hidden_size,
             bias=bias, dtype=dtype, rngs=rngs,
-            axis_names=down_axis_names,
+            axis_names=None if axis_names is None else axis_names.get('d_proj'),
             shard_mode=shard_mode,
             quant=quant, dot_general=dot_general
         )
@@ -290,16 +288,15 @@ class FusedGateMLP(nn.Module):
         bias: bool = False,
         dtype: str | None = None,
         seed: nn.Rngs | None = None,
-        linear_in_axis_names: AxisNames | None = None,
-        linear_out_axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any=None,
         dot_general: Any=None,
     ) -> None:
         self.activation = _resolve_activation(activation)
 
-        self.linear_in = nn.Linear(hidden_size, intermediate_size * 2, bias=bias, dtype=dtype, seed=seed, axis_names=linear_in_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
-        self.linear_out = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, seed=seed, axis_names=linear_out_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
+        self.linear_in = nn.Linear(hidden_size, intermediate_size * 2, bias=bias, dtype=dtype, seed=seed, axis_names=None if axis_names is None else axis_names.get('gu_proj'), shard_mode=shard_mode, quant=quant, dot_general=dot_general)
+        self.linear_out = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, seed=seed, axis_names=None if axis_names is None else axis_names.get('d_proj'), shard_mode=shard_mode, quant=quant, dot_general=dot_general)
     def __call__(self, x: jax.Array, out_sharding: Any=None) -> jax.Array:
         h = self.linear_in(x)
         h, gate = jnp.split(h, 2, axis=-1)
@@ -393,7 +390,7 @@ class MoERouter(nn.Module):
         rngs: nn.Rngs,
         dtype: DType | None = None,
         dot_general: Any = None,
-        axis_names: AxisNames | None = None,
+        axis_names: AxisName | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
     ) -> None:
         if hidden_size <= 0:
@@ -417,7 +414,7 @@ class MoERouter(nn.Module):
             dtype=dtype,
             rngs=rngs,
             dot_general=dot_general,
-            axis_names=axis_names,
+            axis_names=None if axis_names is None else axis_names.get('router'),
             shard_mode=shard_mode,
         )
 

@@ -23,14 +23,14 @@ from jax.nn.initializers import lecun_uniform
 from taktiny import nn
 from taktiny.nn.continuo import _constrain, _validate_integer
 
-from destiny.utils.typing import AxisName, AxisNames, DType, Initializer, ShardMode
+from destiny.utils.typing import DType, Initializer, ShardMode
 
 default_recurrent_initializer = lecun_uniform()
 def _projection_axis_names(
-    input_axis: AxisName,
-    hidden_axis: AxisName,
+    input_axis: str | None,
+    hidden_axis: str | None,
     gates: int,
-) -> AxisNames:
+) -> tuple[str | None, ...]:
     if gates == 1:
         return (input_axis, hidden_axis)
     return (input_axis, None, hidden_axis)
@@ -46,8 +46,8 @@ class _RNNCell(nn.Module):
         dtype: DType,
         rngs: nn.Rngs,
         initializer: Initializer,
-        input_axis: AxisName,
-        hidden_axis: AxisName,
+        input_axis: str | None,
+        hidden_axis: str | None,
         shard_mode: ShardMode,
         quant: Any,
         dot_general: Any,
@@ -115,8 +115,8 @@ class _LSTMCell(nn.Module):
         dtype: DType,
         rngs: nn.Rngs,
         initializer: Initializer,
-        input_axis: AxisName,
-        hidden_axis: AxisName,
+        input_axis: str | None,
+        hidden_axis: str | None,
         shard_mode: ShardMode,
         quant: Any,
         dot_general: Any,
@@ -193,8 +193,8 @@ class _GRUCell(nn.Module):
         dtype: DType,
         rngs: nn.Rngs,
         initializer: Initializer,
-        input_axis: AxisName,
-        hidden_axis: AxisName,
+        input_axis: str | None,
+        hidden_axis: str | None,
         shard_mode: ShardMode,
         quant: Any,
         dot_general: Any,
@@ -267,12 +267,12 @@ class _RecurrentBase(nn.Module):
         dropout: float,
         bidirectional: bool,
         dtype: DType | None,
-        axis_names: AxisNames | None,
+        axis_names: tuple[str | None, ...] | None,
         shard_mode: ShardMode,
         unroll: int | bool,
         output_size: int,
         state_sizes: tuple[int, ...],
-        cell_factory: Callable[[int, AxisName, AxisName], nn.Module],
+        cell_factory: Callable[[int, str | None, str | None], nn.Module],
     ) -> None:
         _validate_integer(input_size, 'input_size')
         _validate_integer(hidden_size, 'hidden_size')
@@ -509,7 +509,7 @@ class RNN(_RecurrentBase):
         dtype: DType | None = None,
         rngs: nn.Rngs,
         initializer: Initializer = default_recurrent_initializer,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -571,7 +571,7 @@ class LSTM(_RecurrentBase):
         dtype: DType | None = None,
         rngs: nn.Rngs,
         initializer: Initializer = default_recurrent_initializer,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,
@@ -643,7 +643,7 @@ class GRU(_RecurrentBase):
         dtype: DType | None = None,
         rngs: nn.Rngs,
         initializer: Initializer = default_recurrent_initializer,
-        axis_names: AxisNames | None = None,
+        axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant: Any = None,
         dot_general: Any = None,

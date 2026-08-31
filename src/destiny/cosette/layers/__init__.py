@@ -16,6 +16,7 @@
 from destiny.cosette.layers.attention import *
 from destiny.cosette.layers.embedding import *
 from destiny.cosette.layers.ffn import *
+from destiny.cosette.layers.layer_utils import *
 from destiny.cosette.layers.normalization import *
 from destiny.cosette.layers.positional_embedding import *
 from destiny.cosette.layers.recurrent import *
