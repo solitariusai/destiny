@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from destiny.cosette.transformers.ordinario import TransformerCausalLM
+from destiny.maestro.transformer import TransformerCausalLM
 from destiny.maestro.symphony.qwen.config import Qwen2Config, Qwen3Config
 from destiny.maestro.symphony.qwen.qwen2 import Qwen2Model
 from destiny.maestro.symphony.qwen.qwen3 import Qwen3Model

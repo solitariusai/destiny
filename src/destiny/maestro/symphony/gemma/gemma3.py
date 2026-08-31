@@ -25,6 +25,7 @@ from taktiny import nn
 from destiny.cosette.layers import _RotaryEmbedding
 from destiny.cosette.transformers.gemma import Gemma3DecoderLayer
 from destiny.cosette.transformers.ordinario import PositionEmbedding, PositionEmbeddings
+from destiny.cosette.utils import ModelConfig
 from destiny.maestro.symphony.gemma.config import Gemma3TextConfig
 from destiny.maestro.symphony.gemma.gemma2 import Gemma2Model
 
@@ -39,7 +40,7 @@ class Gemma3TextModel(Gemma2Model):
         rngs: nn.Rngs,
         **kwargs: Any,
     ) -> None:
-        pattern = config.sliding_window_pattern
+        pattern = config._sliding_window_pattern
         if not isinstance(pattern, int) or isinstance(pattern, bool):
             raise TypeError('sliding_window_pattern must be an integer')
         if pattern <= 0:
@@ -66,7 +67,7 @@ class Gemma3TextModel(Gemma2Model):
         )
         local_theta = (
             config.rope_local_base_freq
-            or default_theta.local
+            or default_theta.get('local')
         )
         rope_parameters = ModelConfig(
             full_attention={
@@ -79,13 +80,19 @@ class Gemma3TextModel(Gemma2Model):
             },
         )
         if config.rope_parameters is not None:
+            rope_overrides = config.rope_parameters
+            if isinstance(rope_overrides, Mapping):
+                rope_overrides = ModelConfig(**rope_overrides)
             rope_parameters = rope_parameters.with_overrides(
-                config.rope_parameters
+                rope_overrides
             )
         if config.rope_scaling is not None:
+            rope_scaling = config.rope_scaling
+            if isinstance(rope_scaling, Mapping):
+                rope_scaling = ModelConfig(**rope_scaling)
             rope_parameters.full_attention = (
                 rope_parameters.full_attention.with_overrides(
-                    config.rope_scaling
+                    rope_scaling
                 )
             )
         config.rope_parameters = rope_parameters

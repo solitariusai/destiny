@@ -20,7 +20,8 @@ from typing import Any, Self
 import jax
 import jax.numpy as jnp
 
-from destiny.cosette.transformers.ordinario import TransformerCausalLM
+from destiny.cosette.utils import ModuleMap
+from destiny.maestro.transformer import TransformerCausalLM
 from destiny.maestro.symphony.gemma import Gemma2Model, Gemma3TextModel, GemmaModel
 from destiny.maestro.symphony.gemma.config import (
     Gemma2Config,
@@ -53,11 +54,11 @@ class GemmaForCausalLM(TransformerCausalLM):
 class Gemma2ForCausalLM(GemmaForCausalLM):
     _model_type = Gemma2Model
     _default_config = Gemma2Config()
-    _default_module_map = [
-        *GemmaForCausalLM._default_module_map,
-        ('pre_feedforward_layernorm', 'norm3'),
-        ('post_feedforward_layernorm', 'norm4'),
-    ]
+    _default_module_map = (
+        GemmaForCausalLM._default_module_map.copy()
+        .map('pre_feedforward_layernorm', 'norm3')
+        .map('post_feedforward_layernorm', 'norm4')
+    )
 
     def _process_logits(self, logits: jax.Array) -> jax.Array:
         if self.config.final_logit_softcapping is not None:
@@ -76,10 +77,11 @@ class Gemma2ForCausalLM(GemmaForCausalLM):
 @destiny
 class Gemma3ForCausalLM(Gemma2ForCausalLM):
     _model_type = Gemma3TextModel
-    _default_module_map = [
-        ('model.language_model.', 'model.'),
-        *Gemma2._default_module_map,
-    ]
+    _default_module_map = (
+        ModuleMap
+        .map('model.language_model.', 'model.')
+        .extend(Gemma2ForCausalLM._default_module_map)
+    )
     _default_config = Gemma3TextConfig()
 
     @classmethod
@@ -87,12 +89,12 @@ class Gemma3ForCausalLM(Gemma2ForCausalLM):
         cls,
         path_or_repo: PathLike,
         *,
-        config: Gemma3TextModel | None = None,
+        config: Gemma3TextConfig | None = None,
         local: bool = False,
         **kwargs: Any,
     ) -> Self:
         if config is None:
-            config = Gemma3TextModel.load_config(path_or_repo, local=local)
+            config = Gemma3TextConfig.load_config(path_or_repo, local=local)
         if config is None:
             raise ValueError(
                 f'Unable to load config from {path_or_repo!r} (local={local})'

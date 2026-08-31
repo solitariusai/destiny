@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from destiny.cosette.layers.positional_embedding import RopeParameters
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 
 
 # ╻  ╻  ┏━┓┏┳┓┏━┓

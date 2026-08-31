@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from destiny.cosette.transformers.ordinario import TransformerModel
+from destiny.maestro.transformer import TransformerModel
 from destiny.cosette.transformers.qwen import Qwen2DecoderLayer
 
 

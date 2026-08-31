@@ -20,7 +20,7 @@ from destiny.cosette.transformers.gemma import (
     GemmaRMSNorm,
     GemmaTextScaledWordEmbedding,
 )
-from destiny.cosette.transformers.ordinario import TransformerModel
+from destiny.maestro.transformer import TransformerModel
 
 
 class GemmaModel(TransformerModel):

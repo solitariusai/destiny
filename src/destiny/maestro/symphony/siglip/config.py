@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import ClassVar
 
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 
 logger = logging.getLogger(__name__)
 

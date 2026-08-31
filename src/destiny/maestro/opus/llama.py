@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from destiny.cosette.transformers.ordinario import TransformerCausalLM
+from destiny.maestro.transformer import TransformerCausalLM
 from destiny.maestro.symphony.llama.config import LlamaConfig
 from destiny.maestro.symphony.llama.llama import LlamaModel
 from destiny.maestro.utils import destiny

@@ -27,7 +27,8 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from taktiny.nn import Module, Rngs
 
-from destiny.maestro.utils import ModelConfig, destiny
+from destiny.cosette.utils import ModelConfig
+from destiny.maestro.utils import destiny
 from destiny.utils.typing import DType, LogicalRules, PathLike
 
 

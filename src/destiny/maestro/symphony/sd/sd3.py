@@ -25,7 +25,8 @@ from destiny.cosette import layers as ly
 from destiny.cosette.continuo import _config_value
 from destiny.cosette.transformers.ordinario import DiffusionTransformerModel
 from destiny.cosette.transformers.sd import SD3PatchEmbedding, SD3TransformerLayer
-from destiny.maestro.utils import ModelConfig, destiny
+from destiny.cosette.utils import ModelConfig
+from destiny.maestro.utils import destiny
 from destiny.utils.typing import PathLike
 
 # TODO; refactor
