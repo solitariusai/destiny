@@ -20,10 +20,10 @@ __description__ = (
     "full-lifecycle trainers, and native architectures spanning Transformers, Diffusion, and SSMs."
 )
 
-from taktiny.maestro.opus import *
+from destiny.maestro.opus import *
 
 from destiny.maestro.prelude import Maestro
-from destiny.maestro.utils import ModelConfig
+from destiny.cosette.utils import ModelConfig
 from destiny.peft import Takt
 from destiny.trainer import (
     DatasetConfig,

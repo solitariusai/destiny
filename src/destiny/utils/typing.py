@@ -14,7 +14,6 @@
 """Shared type aliases and protocols used across TakTiny."""
 
 from __future__ import annotations
-
 import collections.abc as cab
 import enum
 import typing as tp
@@ -34,8 +33,6 @@ type PRNGKey        = jax.Array
 type PyTree         = tp.Any
 type Shape          = cab.Sequence[int]
 type Axes           = int | cab.Sequence[int]
-type AxisName       = str | None
-type AxisNames      = tuple[AxisName, ...]
 type MeshAxisName   = str | tuple[str, ...] | None
 type LogicalRules   = cab.Sequence[tuple[str, MeshAxisName]]
 type Sharding       = NamedSharding | PartitionSpec | None
@@ -74,19 +71,32 @@ class EpochAware(tp.Protocol):
     def set_epoch(self, epoch: int) -> None: ...
 
 
+class MeshAxis(enum.Enum):
+    """
+    Logical mesh axes.
+
+    TP: Tensor parallel.
+    DP: Data parallel.
+    RP: Replicated (not sharded).
+    """
+
+    TP = 'tp'
+    DP = 'dp'
+    RP = None
+
+
 __all__ = [
     'Activation',
     'Array',
     'ArrayLike',
     'Axes',
-    'AxisName',
-    'AxisNames',
     'Batch',
     'DType',
     'EpochAware',
     'Initializer',
     'LogicalRules',
     'LossFn',
+    'MeshAxis',
     'MeshAxisName',
     'MeshLike',
     'ModuleFactory',

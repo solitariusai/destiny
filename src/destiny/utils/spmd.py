@@ -90,7 +90,7 @@ def _logical_to_mesh_axes(
     raise ValueError(
       f'Unsupported: Dimensions {dups} occur more than once in array names.'
     )
-  if not isinstance(rules, (tuple, list)):
+  if not isinstance(rules, Sequence):
     raise ValueError('Unknown axis rule specification type.')
   # We assign mesh axes using a priority based ruleset over logical axis names.
   result: list[_UnassignedAxis | None | str | tuple[str, ...]]
