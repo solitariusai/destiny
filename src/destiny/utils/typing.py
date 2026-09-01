@@ -46,12 +46,6 @@ type ModuleFactory  = cab.Callable[..., tp.Any]
 type LossFn         = cab.Callable[[tp.Any, Batch], Array]
 
 
-class ShardMode(enum.Enum):
-    """Select automatic constraints or explicit output shardings."""
-    AUTO = 'auto'
-    EXPLICIT = 'explicit'
-
-
 @tp.runtime_checkable
 class StatefulIterator[T](tp.Protocol):
     """cab.Iterator whose cursor can be checkpointed and restored."""
@@ -106,7 +100,6 @@ __all__ = [
     'PathLike',
     'PyTree',
     'Shape',
-    'ShardMode',
     'Sharding',
     'StateDict',
     'StatefulIterator',
