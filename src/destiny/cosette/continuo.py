@@ -20,9 +20,10 @@ from collections.abc import Sequence
 import jax
 import jax.numpy as jnp
 from taktiny import nn
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.utils import ModelConfig
-from destiny.utils.typing import DType, ShardMode
+from destiny.utils.typing import DType
 
 
 def _positive_int(value: tp.Any, name: str) -> int:

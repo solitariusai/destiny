@@ -30,6 +30,7 @@ from taktiny.nn.continuo import (
     _resolve_activation,
 )
 from taktiny.nn.convolution import default_conv_initializer
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.layers.positional_embedding import FrequencyEmbedding
 from destiny.utils.typing import (
@@ -37,7 +38,6 @@ from destiny.utils.typing import (
     ArrayLike,
     DType,
     Initializer,
-    ShardMode,
 )
 
 _PositionEmbedding = (

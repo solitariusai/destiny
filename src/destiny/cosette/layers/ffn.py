@@ -24,9 +24,10 @@ import jax
 import jax.numpy as jnp
 from taktiny import nn
 from taktiny.nn.continuo import _constrain, _resolve_activation
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.utils import AxisName
-from destiny.utils.typing import Activation, DType, ShardMode
+from destiny.utils.typing import Activation, DType
 
 
 class FeedForward(nn.Module):

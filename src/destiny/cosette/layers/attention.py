@@ -21,14 +21,15 @@ import jax
 import jax.numpy as jnp
 import taktiny.nn as nn
 from taktiny.nn.continuo import _constrain
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.utils import AxisName
 from destiny.utils.typing import (
     DType,
     Initializer,
-    ShardMode,
     Sharding,
 )
+
 
 class _AcrossHeadsRMSNorm(nn.Module):
     """RMS-normalize the combined heads and head-width dimensions."""

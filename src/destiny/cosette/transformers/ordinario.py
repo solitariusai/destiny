@@ -26,6 +26,7 @@ import qwix
 from taktiny import nn
 from taktiny.maestro.overture import ModelOutput, PretrainedModel
 from taktiny.nn.continuo import _constrain
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.continuo import (
     _activation,
@@ -59,7 +60,6 @@ from destiny.utils.typing import (
     ArrayLike,
     LogicalRules,
     PathLike,
-    ShardMode,
 )
 
 KVCache = tuple[jax.Array, jax.Array]

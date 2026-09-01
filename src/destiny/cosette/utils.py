@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import collections.abc as cab
 import json
+import logging
 import typing as tp
-from collections.abc import Iterator, Mapping, Sequence, Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import update_wrapper
 from pathlib import Path
 from typing import Any, Concatenate, Self, overload
@@ -27,18 +28,21 @@ import jax
 import jax.numpy as jnp
 from huggingface_hub import hf_hub_download
 from taktiny import nn
+from taktiny.utils.typing import ShardMode
 
 from destiny.utils.typing import (
     Activation,
     Axes,
     DType,
     Initializer,
+    MeshAxis,
     PathLike,
-    ShardMode, MeshAxis,
 )
 
 _MISSING = object()
 
+
+logger = logging.getLogger(__name__)
 
 
 class ModelConfig:
@@ -186,22 +190,9 @@ class ModelConfig:
 def _validate_dtype_config(config: ModelConfig):
     dtype = config.dtype or config.torch_dtype
     if dtype is None:
-        import warnings
-        warnings.warn('Not found `dtype` or `torch_dtype` in model config fallback to float32')
+        logger.warning('Not found `dtype` or `torch_dtype` in model config fallback to float32')
         dtype = 'float32'
     return dtype
-
-
-def _verify_required_config_attributes(config: ModelConfig, config_attributes: tp.Sequence[str] | None) -> None:
-    missing = []
-    if config_attributes is None:
-        return
-
-    for attr in config_attributes:
-        if not hasattr(config, attr):
-            missing.append(attr)
-    if len(missing) > 0:
-        raise ValueError(f'Missing config attributes: {', '.join(missing)}.')
 
 
 @jax.tree_util.register_pytree_node_class
@@ -556,6 +547,81 @@ class ModuleMap[M: ModuleMap](Sequence[tuple[tp.Any, ...]]):
 
         self.mapping.append((normalized_sources, target, concat_values))
         return self
+
+    def apply(
+        self,
+        state_dict: Mapping[str, tp.Any],
+    ) -> dict[str, tp.Any]:
+        """Apply every mapping rule to a flat state dictionary in order."""
+        if not isinstance(state_dict, Mapping):
+            raise TypeError('state_dict must be a mapping')
+        current = dict(state_dict)
+        if any(not isinstance(name, str) for name in current):
+            raise TypeError('state-dict keys must be strings')
+
+        for rule in self.mapping:
+            source, target = rule[:2]
+            transform = rule[2] if len(rule) == 3 else None
+            sources = (source,) if isinstance(source, str) else tuple(source)
+            targets = (target,) if isinstance(target, str) else tuple(target)
+            if not sources or not targets:
+                raise ValueError('module-map sources and targets cannot be empty')
+            primary = sources[0]
+            consumed = set()
+            produced = {}
+
+            for name in tuple(current):
+                if name in consumed or primary not in name:
+                    continue
+                sibling_names = tuple(
+                    name.replace(primary, pattern)
+                    for pattern in sources
+                )
+                if any(sibling not in current for sibling in sibling_names):
+                    continue
+                values = tuple(current[sibling] for sibling in sibling_names)
+                if transform is None:
+                    transformed = values
+                else:
+                    result = transform(*values)
+                    transformed = (
+                        tuple(result)
+                        if isinstance(result, (list, tuple))
+                        else (result,)
+                    )
+                if len(transformed) != len(targets):
+                    raise ValueError(
+                        'module-map transform returned '
+                        f'{len(transformed)} values for {len(targets)} targets'
+                    )
+                for target_pattern, value in zip(
+                    targets,
+                    transformed,
+                    strict=True,
+                ):
+                    mapped_name = name.replace(primary, target_pattern)
+                    if mapped_name in produced:
+                        raise ValueError(
+                            'module-map rules produced duplicate key '
+                            f'{mapped_name!r}'
+                        )
+                    produced[mapped_name] = value
+                consumed.update(sibling_names)
+
+            remaining = {
+                name: value
+                for name, value in current.items()
+                if name not in consumed
+            }
+            collisions = set(remaining).intersection(produced)
+            if collisions:
+                name = min(collisions)
+                raise ValueError(
+                    f'module-map output collides with existing key {name!r}'
+                )
+            remaining.update(produced)
+            current = remaining
+        return current
 
     def __repr__(self: Self) -> str:
         return f'{type(self).__name__}({self.mapping!r})'

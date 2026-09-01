@@ -21,6 +21,7 @@ from collections.abc import Sequence
 import jax
 import jax.numpy as jnp
 from taktiny import nn
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette import layers as ly
 from destiny.cosette.continuo import _config_value
@@ -34,7 +35,6 @@ from destiny.utils.typing import (
     Activation,
     DType,
     Sharding,
-    ShardMode,
 )
 
 

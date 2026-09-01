@@ -29,6 +29,7 @@ from taktiny.nn.continuo import (
     _validate_integer,
     _validate_probability,
 )
+from taktiny.utils.typing import ShardMode
 
 from destiny.cosette.layers.attention import Attention, JointAttention
 from destiny.cosette.layers.ffn import FeedForward, GLUMBConv
@@ -38,7 +39,6 @@ from destiny.utils.typing import (
     Activation,
     DType,
     Sharding,
-    ShardMode,
 )
 
 ModuleSpec = nn.Module | type[nn.Module]

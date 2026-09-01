@@ -23,8 +23,9 @@ import jax
 import jax.numpy as jnp
 from taktiny import nn
 from taktiny.nn.continuo import _constrain
+from taktiny.utils.typing import ShardMode
 
-from destiny.utils.typing import DType, ShardMode
+from destiny.utils.typing import DType
 
 
 class RopeParameters(TypedDict):

@@ -28,13 +28,13 @@ from taktiny.nn.continuo import (
     _validate_positive_float,
 )
 from taktiny.nn.linear import default_linear_initializer
+from taktiny.utils.typing import ShardMode
 
 from destiny.utils.typing import (
     Activation,
     Axes,
     DType,
     Initializer,
-    ShardMode,
 )
 
 type NormType = Literal['layernorm', 'rmsnorm']

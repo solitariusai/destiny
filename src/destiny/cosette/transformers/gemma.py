@@ -21,10 +21,11 @@ import typing as tp
 import jax
 import jax.numpy as jnp
 from taktiny import nn
+from taktiny.utils.typing import ShardMode
 
 from destiny.maestro.transformer import TransformerDecoderLayer
 from destiny.cosette.utils import ModelConfig
-from destiny.utils.typing import Axes, DType, Initializer, ShardMode
+from destiny.utils.typing import Axes, DType, Initializer
 
 
 # ┏━╸┏━╸┏┳┓┏┳┓┏━┓

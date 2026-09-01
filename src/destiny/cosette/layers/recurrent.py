@@ -22,8 +22,9 @@ import jax.numpy as jnp
 from jax.nn.initializers import lecun_uniform
 from taktiny import nn
 from taktiny.nn.continuo import _constrain, _validate_integer
+from taktiny.utils.typing import ShardMode
 
-from destiny.utils.typing import DType, Initializer, ShardMode
+from destiny.utils.typing import DType, Initializer
 
 default_recurrent_initializer = lecun_uniform()
 def _projection_axis_names(
