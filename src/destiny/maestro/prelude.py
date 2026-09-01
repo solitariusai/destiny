@@ -18,6 +18,7 @@ if implemented in this library.
 
 from __future__ import annotations
 
+import json
 import typing as tp
 from collections.abc import Mapping
 from typing import Any
@@ -28,6 +29,7 @@ from jax.sharding import Mesh
 from taktiny.nn import Module, Rngs
 
 from destiny.cosette.utils import ModelConfig
+from destiny.maestro.concerto import GenericHub
 from destiny.maestro.utils import destiny
 from destiny.utils.typing import DType, LogicalRules, PathLike
 
@@ -105,20 +107,48 @@ class Maestro:
     def _get_architecture_class(
         cls,
         repo_or_path: PathLike,
-        config: ModelConfig | tp.Dict | None,
+        config: ModelConfig | dict[str, tp.Any] | None,
         config_filename: str,
         local: bool,
         subfolder: str | None = None,
+        revision: str | None = None,
+        token: str | bool | None = None,
+        cache_dir: PathLike | None = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        endpoint: str | None = None,
     ):
         if isinstance(config, dict):
             config = ModelConfig(**config)
         if config is None:
-            config = ModelConfig.load_config(
-                repo_or_path,
-                config_filename,
-                subfolder=subfolder,
-                local=local,
-            )
+            if local:
+                config = ModelConfig.load_config(
+                    repo_or_path,
+                    config_filename,
+                    subfolder=subfolder,
+                    local=True,
+                )
+            else:
+                config_path = GenericHub.download(
+                    str(repo_or_path),
+                    config_filename,
+                    subfolder=subfolder,
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                    endpoint=endpoint,
+                )
+                if not isinstance(config_path, str):
+                    raise TypeError(
+                        'configuration download did not return a local path'
+                    )
+                with open(config_path, encoding='utf-8') as file:
+                    config_data = json.load(file)
+                if not isinstance(config_data, dict):
+                    raise ValueError('model configuration must be an object')
+                config = ModelConfig(**config_data)
         if config is None:
             raise ValueError(f'Unable to load config from {repo_or_path}')
 
@@ -187,7 +217,7 @@ class Maestro:
                 memory used while streaming checkpoint tensors; batching
                 tensors up to this size trades extra host memory for faster
                 materialization. Defaults to ``"1GB"``; pass ``None`` or
-                ``0`` to load one tensor at a time instead.
+                ``0`` to load one mapping group at a time instead.
 
         Returns:
             A materialized instance of the registered Taktiny model.
@@ -201,12 +231,19 @@ class Maestro:
         kwargs = dict(kwargs)
         config_filename = kwargs.pop('config_filename', 'config.json')
         config = kwargs.pop('config', None)
+        subfolder = kwargs.pop('subfolder', None)
         model_cls, config = Maestro._get_architecture_class(
             repo_or_path,
             config,
             config_filename,
             local,
-            kwargs.get('subfolder'),
+            subfolder,
+            revision=kwargs.get('revision'),
+            token=kwargs.get('token'),
+            cache_dir=kwargs.get('cache_dir'),
+            force_download=kwargs.get('force_download', False),
+            local_files_only=kwargs.get('local_files_only', False),
+            endpoint=kwargs.get('endpoint'),
         )
 
         # Parse Mesh if provided as a dict (e.g. {'data': 4, 'model': 2})
@@ -232,6 +269,7 @@ class Maestro:
             stack_type=stack_type,
             allow_unmatched=allow_unmatched,
             config=config,
+            subfolder=subfolder,
             **kwargs
         )
 
@@ -279,12 +317,25 @@ class Maestro:
         """
         config_filename = kwargs.pop('config_filename', 'config.json')
         config = kwargs.pop('config', None)
+        revision = kwargs.pop('revision', None)
+        token = kwargs.pop('token', None)
+        cache_dir = kwargs.pop('cache_dir', None)
+        force_download = kwargs.pop('force_download', False)
+        local_files_only = kwargs.pop('local_files_only', False)
+        endpoint = kwargs.pop('endpoint', None)
+        subfolder = kwargs.pop('subfolder', None)
         model_cls, config = Maestro._get_architecture_class(
             repo_or_path,
             config,
             config_filename,
             local,
-            kwargs.get('subfolder'),
+            subfolder,
+            revision=revision,
+            token=token,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            local_files_only=local_files_only,
+            endpoint=endpoint,
         )
 
         if isinstance(mesh, dict):

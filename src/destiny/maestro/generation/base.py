@@ -11,10 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Shared generation capability contract."""
+
+from __future__ import annotations
+
+import abc
+import typing as tp
 
 
+class Generation(abc.ABC):
+    """Common interface implemented by independent generation capabilities."""
 
-from destiny.maestro.concerto.base import _PretrainedIO
+    @abc.abstractmethod
+    def generate(self, *args: tp.Any, **kwargs: tp.Any) -> tp.Any:
+        """Generate outputs according to the capability's procedure."""
 
-class QuantPretrained(_PretrainedIO):
-    ...
+
+__all__ = ['Generation']

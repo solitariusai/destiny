@@ -11,3 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from destiny.maestro.generation.autoregressive import AutoregressiveGeneration
+from destiny.maestro.generation.base import Generation
+
+__all__ = ['AutoregressiveGeneration', 'Generation']

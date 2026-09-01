@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from destiny.maestro.concerto import GenericHub
 from destiny.maestro.prelude import Maestro
 
-__all__ = ['Maestro']
+__all__ = ['GenericHub', 'Maestro']
