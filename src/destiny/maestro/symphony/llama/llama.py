@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from destiny.maestro.transformer import TransformerModel
 from destiny.cosette.transformers.llama import LlamaDecoderLayer
+from destiny.maestro.transformer import TransformerModel
 
 
 class LlamaModel(TransformerModel):
