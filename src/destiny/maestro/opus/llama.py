@@ -30,7 +30,7 @@ from destiny.maestro.utils import destiny
 @destiny
 class LlamaForCausalLM(TransformerCausalLM):
     _model_type = LlamaModel
-    _default_config = LlamaConfig()
+    _default_config = LlamaConfig
 
 
 __all__ = ['LlamaForCausalLM']

@@ -41,7 +41,7 @@ from destiny.utils.typing import PathLike
 @destiny
 class GemmaForCausalLM(TransformerCausalLM):
     _model_type = GemmaModel
-    _default_config = GemmaConfig()
+    _default_config = GemmaConfig
 
 
 # ┏━╸┏━╸┏┳┓┏┳┓┏━┓
@@ -53,7 +53,7 @@ class GemmaForCausalLM(TransformerCausalLM):
 @destiny
 class Gemma2ForCausalLM(GemmaForCausalLM):
     _model_type = Gemma2Model
-    _default_config = Gemma2Config()
+    _default_config = Gemma2Config
     _default_module_map = (
         GemmaForCausalLM._default_module_map.copy()
         .map('pre_feedforward_layernorm', 'norm3')
@@ -82,7 +82,7 @@ class Gemma3ForCausalLM(Gemma2ForCausalLM):
         .map('model.language_model.', 'model.')
         .extend(Gemma2ForCausalLM._default_module_map)
     )
-    _default_config = Gemma3TextConfig()
+    _default_config = Gemma3TextConfig
 
     @classmethod
     def from_pretrained(

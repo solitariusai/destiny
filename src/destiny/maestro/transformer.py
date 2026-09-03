@@ -373,7 +373,7 @@ class TransformerCausalLM[T: TransformerCausalLM](
             lm_head         = ('embed', 'vocab')
         )
     )
-    _default_config = ModelConfig()
+    _default_config = None
 
     def __init__(
         self: T, 
@@ -383,12 +383,21 @@ class TransformerCausalLM[T: TransformerCausalLM](
         axis_names: AxisName | None = None,
         **kwargs: tp.Any
     ) -> None:
-        if self._model_type is None:
-            raise ValueError('_model_type cannot be None')
+        if self._model_type is None or self._default_config is None:
+            raise ValueError('_model_type and _default_config cannot be None')
 
-        if type(config) is not type(self._default_config):
-            config = type(self._default_config)(**config.to_dict())
+        if isinstance(self._default_config, ModelConfig):
+            self._default_config = type(self._default_config)
+
+        if not issubclass(self._default_config, ModelConfig):
+            raise TypeError('_default_config shoule be subclass of ModelConfig')
+
+        # passed config is an instance
+        # self._default_config is a class
+        if type(config) is not self._default_config:
+            config = self._default_config(**config.to_dict())
         self.config = config
+
         if axis_names is not None and not isinstance(axis_names, AxisName):
             raise TypeError('axis_names must be an AxisName or None')
         self.axis_names = (

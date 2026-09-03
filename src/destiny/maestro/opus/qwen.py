@@ -31,7 +31,7 @@ from destiny.maestro.utils import destiny
 @destiny
 class Qwen2ForCausalLM(TransformerCausalLM):
     _model_type = Qwen2Model
-    _default_config = Qwen2Config()
+    _default_config = Qwen2Config
 
 
 # ┏━┓╻ ╻┏━╸┏┓╻┏━┓
@@ -43,7 +43,7 @@ class Qwen2ForCausalLM(TransformerCausalLM):
 @destiny
 class Qwen3ForCausalLM(TransformerCausalLM):
     _model_type = Qwen3Model
-    _default_config = Qwen3Config()
+    _default_config = Qwen3Config
 
 
 __all__ = [
