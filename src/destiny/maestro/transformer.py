@@ -386,8 +386,9 @@ class TransformerCausalLM[T: TransformerCausalLM](
         if self._model_type is None:
             raise ValueError('_model_type cannot be None')
 
-        self.config = self._default_config.with_overrides(config)
-        config = self.config
+        if type(config) is not type(self._default_config):
+            config = type(self._default_config)(**config.to_dict())
+        self.config = config
         if axis_names is not None and not isinstance(axis_names, AxisName):
             raise TypeError('axis_names must be an AxisName or None')
         self.axis_names = (
